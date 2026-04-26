@@ -1,0 +1,4 @@
+source_name,canonical_url,platform,incremental_url,collector_kind,dedupe_key,lang,status,notes
+合成生物学,https://synbioj.cip.com.cn/CN/2096-8280/home.shtml,magtech_cip,https://synbioj.cip.com.cn/CN/rss_zxly_2096-8280.xml,rss+html_detail,doi,zh,active,优先抓最新录用; 可补当期目录和在线预览
+Advanced Biotechnology,https://link.springer.com/journal/44307,springer,https://link.springer.com/journal/44307/articles,html_articles_paged,doi,en,active,主抓 articles; 历史补抓 volumes-and-issues
+Journal of Biological Engineering,https://link.springer.com/journal/13036,springer,https://link.springer.com/journal/13036/online-first,html_online_first+html_articles_fallback,doi,en,active,优先抓 online-first; 用 articles 补漏
