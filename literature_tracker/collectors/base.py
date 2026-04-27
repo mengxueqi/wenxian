@@ -90,7 +90,7 @@ class BaseCollector(ABC):
         title_values = self.meta_contents(soup, "citation_title")
         author_values = self.meta_contents(soup, "citation_author")
         author_values.extend(self.meta_contents(soup, "citation_authors"))
-        abstract_values = self.meta_contents(soup, "description")
+        abstract_values = self.abstract_contents(soup)
         journal_values = self.meta_contents(soup, "citation_journal_title")
         doi_values = self.meta_contents(soup, "citation_doi")
         language_values = self.meta_contents(soup, "citation_language")
@@ -147,6 +147,34 @@ class BaseCollector(ABC):
             seen.add(key)
             unique_values.append(cleaned)
         return unique_values
+
+    @classmethod
+    def abstract_contents(cls, soup: BeautifulSoup) -> list[str]:
+        values: list[str] = []
+        for meta_name in (
+            "citation_abstract",
+            "dc.description",
+            "dc.Description",
+            "description",
+        ):
+            values.extend(cls.meta_contents(soup, meta_name))
+
+        for selector in (
+            "#Abs1-content",
+            "section#Abs1 .c-article-section__content",
+            "[data-test='abstract']",
+            ".Abstract",
+        ):
+            for node in soup.select(selector):
+                text = cls.clean_text(node.get_text(" ", strip=True))
+                if text:
+                    values.append(cls._strip_abstract_heading(text))
+
+        return sorted(cls.dedupe_text_values(values), key=len, reverse=True)
+
+    @staticmethod
+    def _strip_abstract_heading(value: str) -> str:
+        return re.sub(r"^(abstract|摘要)\s*", "", value, flags=re.IGNORECASE).strip()
 
     def build_record(
         self,

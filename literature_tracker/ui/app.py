@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 
 import streamlit as st
@@ -17,6 +18,7 @@ from ..presentation import (
     rows_to_csv_bytes,
 )
 from ..storage import SQLiteRepository
+from ..tasks import crawl_sources, run_change_detection, run_insight_build, run_process_stage
 
 
 def render_app(db_path: Path = DB_PATH) -> None:
@@ -29,6 +31,20 @@ def render_app(db_path: Path = DB_PATH) -> None:
 
     repository = SQLiteRepository(db_path)
     repository.initialize()
+
+    if st.sidebar.button("一键抓取", type="primary", use_container_width=True):
+        with st.spinner("一键抓取中..."):
+            st.session_state["one_click_crawl_result"] = _run_one_click_crawl(db_path)
+
+    if "one_click_crawl_result" in st.session_state:
+        result = st.session_state["one_click_crawl_result"]
+        st.sidebar.success(
+            "抓取完成："
+            f"{result['raw_records']} 条原始记录，"
+            f"{result['papers']} 篇论文，"
+            f"{result['changes']} 条变化，"
+            f"{result['tracking_items']} 个追踪项。"
+        )
 
     all_snapshot = build_snapshot(repository)
     source_options = ["All Sources"] + [row["source_name"] for row in all_snapshot["source_summary"]]
@@ -49,7 +65,7 @@ def render_app(db_path: Path = DB_PATH) -> None:
     )
     score_labels = st.sidebar.multiselect("Score label", filter_options["score_labels"])
     change_types = st.sidebar.multiselect("Change type", filter_options["change_types"])
-    themes = st.sidebar.multiselect("Themes", filter_options["themes"])
+    themes = st.sidebar.multiselect("Keywords", filter_options["themes"])
 
     max_priority = max(
         (float(card["priority_score"] or 0) for card in snapshot["focus_cards"]),
@@ -156,32 +172,29 @@ def render_app(db_path: Path = DB_PATH) -> None:
             if filtered_snapshot["focus_cards"]:
                 for card in filtered_snapshot["focus_cards"]:
                     with st.container(border=True):
-                        left, right = st.columns([3, 2])
-                        left.markdown(f"### {card['title']}")
-                        left.caption(
-                            " | ".join(
-                                value
-                                for value in (
-                                    card["source_name"],
-                                    card["journal_name"],
-                                    card["published_at"] or "unknown",
-                                )
-                                if value
-                            )
+                        st.markdown(
+                            "<div style='font-size: 1.08rem; font-weight: 650; "
+                            f"line-height: 1.35;'>{escape(card['title'])}</div>",
+                            unsafe_allow_html=True,
                         )
-                        left.write(
-                            card["insight_summary"]
-                            or card["latest_change_summary"]
-                            or "No summary available."
+                        abstract = card["abstract"] or "No abstract available."
+                        preview_abstract, remaining_abstract = _split_leading_sentences(
+                            abstract,
+                            sentence_count=2,
                         )
-                        left.write(card["insight_reason"] or card["note"] or "No reason available.")
+                        st.write(preview_abstract)
+                        if remaining_abstract:
+                            with st.expander("Full abstract", expanded=False):
+                                st.write(remaining_abstract)
+                        st.write(
+                            "Keywords: "
+                            + (", ".join(card["themes"]) if card["themes"] else "n/a")
+                        )
+                        priority_text = f"Priority: {float(card['priority_score'] or 0):.2f}"
                         if card["article_url"]:
-                            left.markdown(f"[Open Article]({card['article_url']})")
-                        right.metric("Priority", f"{float(card['priority_score'] or 0):.2f}")
-                        right.metric("Status", card["tracking_status"])
-                        right.metric("Score Label", card["score_label"] or "n/a")
-                        if card["themes"]:
-                            right.write("Themes: " + ", ".join(card["themes"]))
+                            st.markdown(f"{priority_text} | [Open Article]({card['article_url']})")
+                        else:
+                            st.write(priority_text)
             else:
                 st.info("No papers match the current filters.")
 
@@ -289,9 +302,60 @@ def _build_active_filters(
     if change_types:
         parts.append("change=" + ",".join(change_types))
     if themes:
-        parts.append("theme=" + ",".join(themes))
+        parts.append("keywords=" + ",".join(themes))
     if min_priority > 0:
         parts.append(f"min_priority={min_priority:.2f}")
     if sort_label != SORT_OPTIONS["priority_desc"]:
         parts.append(f"sort={sort_label}")
     return parts
+
+
+def _run_one_click_crawl(db_path: Path) -> dict[str, int]:
+    crawl_summary = crawl_sources(db_path=db_path)
+    process_summary = run_process_stage(db_path=db_path)
+    change_summary = run_change_detection(db_path=db_path)
+    insight_summary = run_insight_build(db_path=db_path)
+
+    return {
+        "raw_records": int(crawl_summary["stored_raw_records"]),
+        "papers": int(process_summary["upserted_papers"]),
+        "changes": int(change_summary["detected_changes"]),
+        "tracking_items": int(insight_summary["upserted_tracking_items"]),
+    }
+
+
+def _preview_text(value: str, *, max_chars: int = 360) -> tuple[str, bool]:
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_chars:
+        return normalized, False
+    return normalized[:max_chars].rstrip() + "...", True
+
+
+def _split_leading_sentences(value: str, *, sentence_count: int) -> tuple[str, str]:
+    normalized = " ".join(value.split())
+    if not normalized:
+        return "No abstract available.", ""
+
+    abbreviations = {"e.g", "i.e", "etc", "fig", "eq", "no", "al", "sp", "spp", "vs"}
+    sentence_ends: list[int] = []
+    for index, char in enumerate(normalized):
+        if char not in ".!?。！？":
+            continue
+        prefix = normalized[:index].rstrip()
+        suffix = normalized[index + 1 :].lstrip()
+        previous_token = prefix.rsplit(" ", 1)[-1].rstrip(".").casefold()
+        if char == "." and previous_token in abbreviations:
+            continue
+        if char == "." and suffix and suffix[0].islower():
+            continue
+        sentence_ends.append(index + 1)
+        if len(sentence_ends) >= sentence_count:
+            split_at = sentence_ends[-1]
+            preview = normalized[:split_at].strip()
+            rest = normalized[split_at:].strip()
+            return preview, rest
+
+    preview, has_more = _preview_text(normalized, max_chars=220)
+    if not has_more:
+        return preview, ""
+    return preview, normalized[len(preview.rstrip(".")) :].strip()

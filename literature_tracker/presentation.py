@@ -43,6 +43,7 @@ def build_snapshot(
             {
                 "paper_id": paper.id,
                 "title": paper.canonical_title,
+                "abstract": paper.abstract,
                 "source_name": paper.source_name,
                 "journal_name": paper.journal_name,
                 "published_at": paper.published_at,

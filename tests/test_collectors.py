@@ -66,6 +66,8 @@ class CollectorHelperTests(unittest.TestCase):
             <meta name="citation_title" content="Example Springer Paper" />
             <meta name="citation_author" content="Alice Example" />
             <meta name="citation_author" content="Bob Example" />
+            <meta name="description" content="Short abstract." />
+            <meta name="citation_abstract" content="A much longer abstract that should be preferred." />
             <meta name="citation_doi" content="10.1007/example" />
           </head>
         </html>
@@ -84,7 +86,31 @@ class CollectorHelperTests(unittest.TestCase):
 
         self.assertEqual(enriched.title, "Example Springer Paper")
         self.assertEqual(enriched.authors, "Alice Example; Bob Example")
+        self.assertEqual(enriched.abstract, "A much longer abstract that should be preferred.")
         self.assertEqual(enriched.doi, "10.1007/example")
+
+    def test_abstract_contents_extracts_body_abstract(self) -> None:
+        html = """
+        <html>
+          <head>
+            <meta name="description" content="Short abstract." />
+          </head>
+          <body>
+            <section id="Abs1">
+              <h2>Abstract</h2>
+              <div id="Abs1-content" class="c-article-section__content">
+                <p>This is the full abstract text with more detail than the metadata.</p>
+              </div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        self.assertEqual(
+            BaseCollector.abstract_contents(soup)[0],
+            "This is the full abstract text with more detail than the metadata.",
+        )
 
 
 if __name__ == "__main__":

@@ -66,6 +66,7 @@ class PresentationTests(unittest.TestCase):
             self.assertEqual(filtered["metrics"]["papers"], 1)
             self.assertEqual(filtered["metrics"]["changes"], 1)
             self.assertEqual(filtered["focus_cards"][0]["title"], "Retraction Note: Vesicle delivery study")
+            self.assertEqual(filtered["focus_cards"][0]["abstract"], "This article has been retracted.")
             self.assertEqual(filtered["focus_cards"][0]["tracking_status"], "priority")
 
     def test_build_filter_options_collects_current_snapshot_values(self) -> None:
