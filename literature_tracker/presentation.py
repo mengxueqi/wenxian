@@ -336,6 +336,98 @@ def build_change_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def build_new_paper_batch_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = build_new_paper_rows(snapshot)
+    if not rows:
+        return []
+
+    rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_date[row["batch_date"]].append(row)
+
+    batches: list[dict[str, Any]] = []
+    for batch_date, batch_rows in rows_by_date.items():
+        paper_ids = {row["paper_id"] for row in batch_rows}
+        source_names = {row["source_name"] for row in batch_rows if row["source_name"]}
+        priority_items = sum(1 for row in batch_rows if row["tracking_status"] == "priority")
+        batches.append(
+            {
+                "batch_date": batch_date,
+                "new_papers": len(paper_ids),
+                "existing_papers_before_batch": _count_existing_papers_before_batch(
+                    snapshot,
+                    rows,
+                    batch_date,
+                ),
+                "source_count": len(source_names),
+                "sources": ", ".join(sorted(source_names)),
+                "priority_items": priority_items,
+            }
+        )
+
+    return sorted(batches, key=lambda row: row["batch_date"], reverse=True)
+
+
+def build_new_paper_rows(
+    snapshot: dict[str, Any],
+    *,
+    batch_date: str | None = None,
+) -> list[dict[str, Any]]:
+    papers_by_id = {paper.id: paper for paper in snapshot["papers"]}
+    insights_by_change = {row["change_id"]: row for row in snapshot["insights"]}
+    tracking_by_paper = {item["paper_id"]: item for item in snapshot["tracking_items"]}
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for change in snapshot["changes"]:
+        if change.change_type != "new_paper":
+            continue
+        change_date = _date_part(change.detected_at)
+        if batch_date is not None and change_date != batch_date:
+            continue
+        dedupe_key = (change_date, change.paper_id)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        paper = papers_by_id.get(change.paper_id)
+        insight = insights_by_change.get(change.id)
+        tracking = tracking_by_paper.get(change.paper_id, {})
+        insight_metadata = (insight or {}).get("metadata", {})
+        tracking_metadata = tracking.get("metadata", {}) if tracking else {}
+        themes = insight_metadata.get("themes") or tracking_metadata.get("themes", [])
+        themes_text = ", ".join(themes) if isinstance(themes, list) else str(themes or "")
+        rows.append(
+            {
+                "batch_date": change_date,
+                "detected_at": change.detected_at,
+                "paper_id": change.paper_id,
+                "source_name": change.source_name,
+                "journal_name": paper.journal_name if paper else "",
+                "title": paper.canonical_title if paper else "",
+                "doi": paper.doi if paper else "",
+                "published_at": paper.published_at if paper else "",
+                "score": insight["score"] if insight else None,
+                "score_label": insight["score_label"] if insight else "",
+                "tracking_status": tracking.get("tracking_status", "") if tracking else "",
+                "themes": themes_text,
+                "reason": insight["reason"] if insight else "",
+                "article_url": paper.article_url if paper else "",
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["batch_date"],
+            str(row["detected_at"] or ""),
+            float(row["score"] or 0),
+            row["title"].casefold(),
+        ),
+        reverse=True,
+    )
+
+
 def build_paper_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     tracking_by_paper = {item["paper_id"]: item for item in snapshot["tracking_items"]}
     insight_by_paper: dict[int, dict[str, Any]] = {}
@@ -472,6 +564,39 @@ def _card_matches(
         )
     ).casefold()
     return normalized_query in text_blob
+
+
+def _count_existing_papers_before_batch(
+    snapshot: dict[str, Any],
+    new_paper_rows: list[dict[str, Any]],
+    batch_date: str,
+) -> int:
+    first_new_date_by_paper: dict[int, str] = {}
+    for row in new_paper_rows:
+        paper_id = int(row["paper_id"])
+        current_date = first_new_date_by_paper.get(paper_id)
+        if current_date is None or row["batch_date"] < current_date:
+            first_new_date_by_paper[paper_id] = row["batch_date"]
+
+    count = 0
+    for paper in snapshot["papers"]:
+        first_new_date = first_new_date_by_paper.get(paper.id)
+        if first_new_date:
+            if first_new_date < batch_date:
+                count += 1
+            continue
+
+        paper_date = _date_part(paper.created_at or paper.updated_at or paper.published_at)
+        if paper_date and paper_date < batch_date:
+            count += 1
+    return count
+
+
+def _date_part(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 10:
+        return text[:10]
+    return "unknown"
 
 
 def _csv_value(value: Any) -> Any:

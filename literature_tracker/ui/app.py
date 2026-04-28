@@ -12,6 +12,8 @@ from ..presentation import (
     build_filter_options,
     build_filtered_snapshot,
     build_markdown_report,
+    build_new_paper_batch_rows,
+    build_new_paper_rows,
     build_paper_rows,
     build_snapshot,
     build_tracking_rows,
@@ -47,67 +49,11 @@ def render_app(db_path: Path = DB_PATH) -> None:
         )
 
     all_snapshot = build_snapshot(repository)
-    source_options = ["All Sources"] + [row["source_name"] for row in all_snapshot["source_summary"]]
-    selected_source = st.sidebar.selectbox("Source", source_options, index=0)
-    effective_source = None if selected_source == "All Sources" else selected_source
-    snapshot = (
-        all_snapshot
-        if effective_source is None
-        else build_snapshot(repository, source_name=effective_source)
-    )
-
-    filter_options = build_filter_options(snapshot)
-    st.sidebar.header("Filters")
-    query = st.sidebar.text_input("Search", placeholder="Title, DOI, theme, summary...")
-    tracking_statuses = st.sidebar.multiselect(
-        "Tracking status",
-        filter_options["tracking_statuses"],
-    )
-    score_labels = st.sidebar.multiselect("Score label", filter_options["score_labels"])
-    change_types = st.sidebar.multiselect("Change type", filter_options["change_types"])
-    themes = st.sidebar.multiselect("Keywords", filter_options["themes"])
-
-    max_priority = max(
-        (float(card["priority_score"] or 0) for card in snapshot["focus_cards"]),
-        default=1.0,
-    )
-    slider_max = max(1.0, round(max_priority, 2))
-    min_priority = st.sidebar.slider(
-        "Minimum priority",
-        min_value=0.0,
-        max_value=slider_max,
-        value=0.0,
-        step=0.01,
-    )
-    sort_label = st.sidebar.selectbox(
-        "Sort focus cards",
-        list(SORT_OPTIONS.values()),
-        index=0,
-    )
-    sort_by = next(
-        key
-        for key, value in SORT_OPTIONS.items()
-        if value == sort_label
-    )
-
-    filtered_snapshot = build_filtered_snapshot(
-        snapshot,
-        query=query,
-        tracking_statuses=tracking_statuses,
-        score_labels=score_labels,
-        change_types=change_types,
-        themes=themes,
-        min_priority=min_priority,
-        sort_by=sort_by,
-    )
-
-    tracking_rows = build_tracking_rows(filtered_snapshot)
-    change_rows = build_change_rows(filtered_snapshot)
-    paper_rows = build_paper_rows(filtered_snapshot)
+    tracking_rows = build_tracking_rows(all_snapshot)
+    change_rows = build_change_rows(all_snapshot)
+    paper_rows = build_paper_rows(all_snapshot)
     report_title = "Literature Tracker Report"
-    if effective_source:
-        report_title = f"{report_title} - {effective_source}"
-    report_markdown = build_markdown_report(filtered_snapshot, title=report_title)
+    report_markdown = build_markdown_report(all_snapshot, title=report_title)
 
     st.sidebar.header("Exports")
     st.sidebar.download_button(
@@ -143,78 +89,150 @@ def render_app(db_path: Path = DB_PATH) -> None:
         use_container_width=True,
     )
 
-    metrics = filtered_snapshot["metrics"]
+    metrics = all_snapshot["metrics"]
     metric_columns = st.columns(4)
     metric_columns[0].metric("Papers", metrics["papers"])
     metric_columns[1].metric("Changes", metrics["changes"])
     metric_columns[2].metric("Insights", metrics["insights"])
     metric_columns[3].metric("Tracking", metrics["tracking_items"])
 
-    active_filters = _build_active_filters(
-        source_name=effective_source,
-        query=query,
-        tracking_statuses=tracking_statuses,
-        score_labels=score_labels,
-        change_types=change_types,
-        themes=themes,
-        min_priority=min_priority,
-        sort_label=sort_label,
-    )
-    if active_filters:
-        st.caption("Active filters: " + " | ".join(active_filters))
-
-    tabs = st.tabs(["Dashboard", "Change Analysis", "Tracking Queue", "Papers", "Report Preview"])
+    tabs = st.tabs(["Library", "Dashboard", "Change Analysis"])
 
     with tabs[0]:
-        st.subheader("Dashboard")
-        summary_left, summary_right = st.columns([3, 2])
-        with summary_left:
-            if filtered_snapshot["focus_cards"]:
-                for card in filtered_snapshot["focus_cards"]:
-                    with st.container(border=True):
-                        st.markdown(
-                            "<div style='font-size: 1.08rem; font-weight: 650; "
-                            f"line-height: 1.35;'>{escape(card['title'])}</div>",
-                            unsafe_allow_html=True,
-                        )
-                        abstract = card["abstract"] or "No abstract available."
-                        preview_abstract, remaining_abstract = _split_leading_sentences(
-                            abstract,
-                            sentence_count=2,
-                        )
-                        st.write(preview_abstract)
-                        if remaining_abstract:
-                            with st.expander("Full abstract", expanded=False):
-                                st.write(remaining_abstract)
-                        st.write(
-                            "Keywords: "
-                            + (", ".join(card["themes"]) if card["themes"] else "n/a")
-                        )
-                        priority_text = f"Priority: {float(card['priority_score'] or 0):.2f}"
-                        if card["article_url"]:
-                            st.markdown(f"{priority_text} | [Open Article]({card['article_url']})")
-                        else:
-                            st.write(priority_text)
-            else:
-                st.info("No papers match the current filters.")
+        source_options = [
+            "All Sources",
+            *[row["source_name"] for row in all_snapshot["source_summary"]],
+        ]
+        selected_source = st.selectbox("Source", source_options, index=0)
+        effective_source = None if selected_source == "All Sources" else selected_source
+        library_snapshot = (
+            all_snapshot
+            if effective_source is None
+            else build_snapshot(repository, source_name=effective_source)
+        )
+        filter_options = build_filter_options(library_snapshot)
 
-        with summary_right:
+        filter_top_columns = st.columns([2, 1, 1])
+        query = filter_top_columns[0].text_input(
+            "Search",
+            placeholder="Title, DOI, theme, summary...",
+        )
+        tracking_statuses = filter_top_columns[1].multiselect(
+            "Tracking status",
+            filter_options["tracking_statuses"],
+        )
+        score_labels = filter_top_columns[2].multiselect(
+            "Score label",
+            filter_options["score_labels"],
+        )
+
+        max_priority = max(
+            (float(card["priority_score"] or 0) for card in library_snapshot["focus_cards"]),
+            default=1.0,
+        )
+        slider_max = max(1.0, round(max_priority, 2))
+        filter_bottom_columns = st.columns([1, 1, 1, 1])
+        change_types = filter_bottom_columns[0].multiselect(
+            "Change type",
+            filter_options["change_types"],
+        )
+        themes = filter_bottom_columns[1].multiselect(
+            "Keywords",
+            filter_options["themes"],
+        )
+        min_priority = filter_bottom_columns[2].slider(
+            "Minimum priority",
+            min_value=0.0,
+            max_value=slider_max,
+            value=0.0,
+            step=0.01,
+        )
+        sort_label = filter_bottom_columns[3].selectbox(
+            "Sort",
+            list(SORT_OPTIONS.values()),
+            index=0,
+        )
+        sort_by = next(
+            key
+            for key, value in SORT_OPTIONS.items()
+            if value == sort_label
+        )
+
+        library_filtered_snapshot = build_filtered_snapshot(
+            library_snapshot,
+            query=query,
+            tracking_statuses=tracking_statuses,
+            score_labels=score_labels,
+            change_types=change_types,
+            themes=themes,
+            min_priority=min_priority,
+            sort_by=sort_by,
+        )
+        active_filters = _build_active_filters(
+            source_name=effective_source,
+            query=query,
+            tracking_statuses=tracking_statuses,
+            score_labels=score_labels,
+            change_types=change_types,
+            themes=themes,
+            min_priority=min_priority,
+            sort_label=sort_label,
+        )
+        if active_filters:
+            st.caption("Active filters: " + " | ".join(active_filters))
+
+        if library_filtered_snapshot["focus_cards"]:
+            for card in library_filtered_snapshot["focus_cards"]:
+                with st.container(border=True):
+                    st.markdown(
+                        "<div style='font-size: 1.08rem; font-weight: 650; "
+                        f"line-height: 1.35;'>{escape(card['title'])}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        f"{card['source_name']} | {card['journal_name']} | "
+                        f"{card['published_at'] or 'unknown date'}"
+                    )
+                    meta_columns = st.columns(3)
+                    meta_columns[0].metric(
+                        "Priority",
+                        f"{float(card['priority_score'] or 0):.2f}",
+                    )
+                    meta_columns[1].metric("Status", card["tracking_status"] or "n/a")
+                    meta_columns[2].metric("Score", card["score_label"] or "n/a")
+                    if card["insight_summary"]:
+                        st.write(card["insight_summary"])
+                    if card["insight_reason"]:
+                        st.write(card["insight_reason"])
+                    st.write(
+                        "Keywords: "
+                        + (", ".join(card["themes"]) if card["themes"] else "n/a")
+                    )
+                    if card["article_url"]:
+                        st.markdown(f"[Open Article]({card['article_url']})")
+        else:
+            st.info("No tracking items match the current filters.")
+
+    with tabs[1]:
+        summary_columns = st.columns(3)
+        with summary_columns[0]:
             st.markdown("#### Source Summary")
-            if filtered_snapshot["source_summary"]:
+            if all_snapshot["source_summary"]:
                 st.dataframe(
-                    filtered_snapshot["source_summary"],
+                    all_snapshot["source_summary"],
                     use_container_width=True,
                     hide_index=True,
                 )
             else:
                 st.info("No visible source summary rows.")
 
+        with summary_columns[1]:
             st.markdown("#### Change Breakdown")
-            if filtered_snapshot["change_breakdown"]:
+            if all_snapshot["change_breakdown"]:
                 st.dataframe(
                     [
                         {"change_type": key, "count": value}
-                        for key, value in filtered_snapshot["change_breakdown"].items()
+                        for key, value in all_snapshot["change_breakdown"].items()
                     ],
                     use_container_width=True,
                     hide_index=True,
@@ -222,12 +240,13 @@ def render_app(db_path: Path = DB_PATH) -> None:
             else:
                 st.info("No visible changes.")
 
+        with summary_columns[2]:
             st.markdown("#### Tracking Breakdown")
-            if filtered_snapshot["tracking_breakdown"]:
+            if all_snapshot["tracking_breakdown"]:
                 st.dataframe(
                     [
                         {"tracking_status": key, "count": value}
-                        for key, value in filtered_snapshot["tracking_breakdown"].items()
+                        for key, value in all_snapshot["tracking_breakdown"].items()
                     ],
                     use_container_width=True,
                     hide_index=True,
@@ -235,48 +254,36 @@ def render_app(db_path: Path = DB_PATH) -> None:
             else:
                 st.info("No visible tracking items.")
 
-    with tabs[1]:
-        st.subheader("Change Analysis")
-        if change_rows:
-            st.dataframe(change_rows, use_container_width=True, hide_index=True)
-            insights_by_change = {row["change_id"]: row for row in filtered_snapshot["insights"]}
-            for change in filtered_snapshot["changes"]:
-                insight = insights_by_change.get(change.id)
-                with st.expander(f"{change.change_type} | {change.summary}", expanded=False):
-                    st.write(f"Source: {change.source_name}")
-                    st.write(f"Detected At: {change.detected_at}")
-                    if insight:
-                        st.write(f"Insight Summary: {insight['summary']}")
-                        st.write(f"Reason: {insight['reason']}")
-                        st.write(f"Score: {insight['score']} ({insight['score_label']})")
-                    st.json(change.metadata)
-        else:
-            st.info("No changes match the current filters.")
-
     with tabs[2]:
-        st.subheader("Tracking Queue")
-        if tracking_rows:
-            st.dataframe(tracking_rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No tracking items match the current filters.")
+        new_paper_batches = build_new_paper_batch_rows(all_snapshot)
+        if new_paper_batches:
+            batch_labels = [
+                (
+                    f"{batch['batch_date']} | {batch['new_papers']} new | "
+                    f"{batch['existing_papers_before_batch']} existing before"
+                )
+                for batch in new_paper_batches
+            ]
+            selected_batch_label = st.selectbox("Batch date", batch_labels)
+            selected_batch = new_paper_batches[batch_labels.index(selected_batch_label)]
+            selected_batch_date = selected_batch["batch_date"]
 
-    with tabs[3]:
-        st.subheader("Papers")
-        if paper_rows:
-            st.dataframe(paper_rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No papers match the current filters.")
+            batch_columns = st.columns(4)
+            batch_columns[0].metric("New papers", selected_batch["new_papers"])
+            batch_columns[1].metric(
+                "Existing before",
+                selected_batch["existing_papers_before_batch"],
+            )
+            batch_columns[2].metric("Sources", selected_batch["source_count"])
+            batch_columns[3].metric("Priority", selected_batch["priority_items"])
 
-    with tabs[4]:
-        st.subheader("Report Preview")
-        st.download_button(
-            "Download Markdown",
-            data=report_markdown.encode("utf-8"),
-            file_name="literature_tracker_report.md",
-            mime="text/markdown",
-            use_container_width=False,
-        )
-        st.code(report_markdown, language="markdown")
+            new_paper_rows = build_new_paper_rows(
+                all_snapshot,
+                batch_date=selected_batch_date,
+            )
+            st.dataframe(new_paper_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No new paper batches match the current filters.")
 
 
 def _build_active_filters(

@@ -5,9 +5,12 @@ import unittest
 from pathlib import Path
 
 from literature_tracker.models import RawRecord
+from literature_tracker.models import StoredPaper, StoredPaperChange
 from literature_tracker.presentation import (
     build_filter_options,
     build_filtered_snapshot,
+    build_new_paper_batch_rows,
+    build_new_paper_rows,
     build_snapshot,
     rows_to_csv_bytes,
 )
@@ -128,6 +131,72 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("title,themes,metadata", payload)
         self.assertIn("crispr, synthetic_biology", payload)
         self.assertIn("Source A", payload)
+
+    def test_new_paper_batches_group_by_detected_date_and_dedupe_papers(self) -> None:
+        snapshot = {
+            "papers": [
+                StoredPaper(
+                    id=1,
+                    raw_record_id=1,
+                    paper_key="old",
+                    source_name="Source A",
+                    journal_name="Source A",
+                    article_url="https://example.com/old",
+                    doi="10.1000/old",
+                    canonical_title="Existing Paper",
+                    normalized_authors="",
+                    published_at="2026-04-20",
+                    created_at="2026-04-27T09:00:00",
+                    updated_at="2026-04-27T09:00:00",
+                ),
+                StoredPaper(
+                    id=2,
+                    raw_record_id=2,
+                    paper_key="new-a",
+                    source_name="Source A",
+                    journal_name="Source A",
+                    article_url="https://example.com/a",
+                    doi="10.1000/a",
+                    canonical_title="New Paper A",
+                    normalized_authors="",
+                    published_at="2026-04-28",
+                    created_at="2026-04-28T10:00:00",
+                    updated_at="2026-04-28T10:00:00",
+                ),
+            ],
+            "changes": [
+                StoredPaperChange(
+                    id=1,
+                    change_key="new-a",
+                    paper_id=2,
+                    source_name="Source A",
+                    change_type="new_paper",
+                    summary="New Paper A",
+                    detected_at="2026-04-28T10:00:00",
+                ),
+                StoredPaperChange(
+                    id=2,
+                    change_key="new-a-duplicate",
+                    paper_id=2,
+                    source_name="Source A",
+                    change_type="new_paper",
+                    summary="New Paper A duplicate crawl",
+                    detected_at="2026-04-28T18:00:00",
+                ),
+            ],
+            "insights": [],
+            "tracking_items": [],
+        }
+
+        rows = build_new_paper_rows(snapshot, batch_date="2026-04-28")
+        batches = build_new_paper_batch_rows(snapshot)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "New Paper A")
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]["batch_date"], "2026-04-28")
+        self.assertEqual(batches[0]["new_papers"], 1)
+        self.assertEqual(batches[0]["existing_papers_before_batch"], 1)
 
 
 if __name__ == "__main__":
