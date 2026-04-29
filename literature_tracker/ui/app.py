@@ -112,7 +112,7 @@ def render_app(db_path: Path = DB_PATH) -> None:
         )
         filter_options = build_filter_options(library_snapshot)
 
-        filter_top_columns = st.columns([2, 1, 1])
+        filter_top_columns = st.columns([2, 1])
         query = filter_top_columns[0].text_input(
             "Search",
             placeholder="Title, DOI, theme, summary...",
@@ -120,10 +120,6 @@ def render_app(db_path: Path = DB_PATH) -> None:
         tracking_statuses = filter_top_columns[1].multiselect(
             "Tracking status",
             filter_options["tracking_statuses"],
-        )
-        score_labels = filter_top_columns[2].multiselect(
-            "Score label",
-            filter_options["score_labels"],
         )
 
         max_priority = max(
@@ -162,7 +158,6 @@ def render_app(db_path: Path = DB_PATH) -> None:
             library_snapshot,
             query=query,
             tracking_statuses=tracking_statuses,
-            score_labels=score_labels,
             change_types=change_types,
             themes=themes,
             min_priority=min_priority,
@@ -172,7 +167,6 @@ def render_app(db_path: Path = DB_PATH) -> None:
             source_name=effective_source,
             query=query,
             tracking_statuses=tracking_statuses,
-            score_labels=score_labels,
             change_types=change_types,
             themes=themes,
             min_priority=min_priority,
@@ -193,17 +187,22 @@ def render_app(db_path: Path = DB_PATH) -> None:
                         f"{card['source_name']} | {card['journal_name']} | "
                         f"{card['published_at'] or 'unknown date'}"
                     )
-                    meta_columns = st.columns(3)
-                    meta_columns[0].metric(
-                        "Priority",
-                        f"{float(card['priority_score'] or 0):.2f}",
+                    meta_columns = st.columns(2)
+                    with meta_columns[0]:
+                        _render_compact_metric(
+                            "Priority",
+                            f"{float(card['priority_score'] or 0):.2f}",
+                        )
+                    with meta_columns[1]:
+                        _render_compact_metric("Status", card["tracking_status"] or "n/a")
+                    abstract_preview, abstract_rest = _split_leading_sentences(
+                        card["abstract"] or "",
+                        sentence_count=2,
                     )
-                    meta_columns[1].metric("Status", card["tracking_status"] or "n/a")
-                    meta_columns[2].metric("Score", card["score_label"] or "n/a")
-                    if card["insight_summary"]:
-                        st.write(card["insight_summary"])
-                    if card["insight_reason"]:
-                        st.write(card["insight_reason"])
+                    st.write(abstract_preview)
+                    if abstract_rest:
+                        with st.expander("More abstract"):
+                            st.write(abstract_rest)
                     st.write(
                         "Keywords: "
                         + (", ".join(card["themes"]) if card["themes"] else "n/a")
@@ -291,7 +290,6 @@ def _build_active_filters(
     source_name: str | None,
     query: str,
     tracking_statuses: list[str],
-    score_labels: list[str],
     change_types: list[str],
     themes: list[str],
     min_priority: float,
@@ -304,8 +302,6 @@ def _build_active_filters(
         parts.append(f"query={query.strip()}")
     if tracking_statuses:
         parts.append("status=" + ",".join(tracking_statuses))
-    if score_labels:
-        parts.append("score=" + ",".join(score_labels))
     if change_types:
         parts.append("change=" + ",".join(change_types))
     if themes:
@@ -329,6 +325,16 @@ def _run_one_click_crawl(db_path: Path) -> dict[str, int]:
         "changes": int(change_summary["detected_changes"]),
         "tracking_items": int(insight_summary["upserted_tracking_items"]),
     }
+
+
+def _render_compact_metric(label: str, value: str) -> None:
+    st.markdown(
+        "<div style='margin: 0.3rem 0 0.8rem 0;'>"
+        f"<div style='font-size: 0.78rem; color: #6b7280; line-height: 1.2;'>{escape(label)}</div>"
+        f"<div style='font-size: 1.05rem; font-weight: 600; line-height: 1.3; color: #111827;'>{escape(value)}</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _preview_text(value: str, *, max_chars: int = 360) -> tuple[str, bool]:

@@ -904,6 +904,7 @@ class SQLiteRepository:
             ON tracking_items(tracking_key)
             """
         )
+        self._migrate_tracking_status_labels(connection)
 
     @staticmethod
     def _ensure_column(
@@ -920,6 +921,16 @@ class SQLiteRepository:
             return
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+        )
+
+    @staticmethod
+    def _migrate_tracking_status_labels(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            UPDATE tracking_items
+            SET tracking_status = 'review'
+            WHERE tracking_status = 'priority'
+            """
         )
 
     @classmethod

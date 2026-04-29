@@ -45,8 +45,9 @@ class PresentationTests(unittest.TestCase):
                         journal_name="Source B",
                         listing_url="https://example.com/b/articles",
                         article_url="https://example.com/b/1",
-                        title="Retraction Note: Vesicle delivery study",
-                        abstract="This article has been retracted.",
+                        title="Retraction Note: CRISPR synthetic biology vesicle delivery study",
+                        authors="Jay Keasling; Other Author",
+                        abstract="This retracted synthetic biology article uses CRISPR tools.",
                         doi="10.1000/b1",
                         collector_kind="html",
                     ),
@@ -60,17 +61,22 @@ class PresentationTests(unittest.TestCase):
             filtered = build_filtered_snapshot(
                 snapshot,
                 query="retraction",
-                tracking_statuses=["priority"],
-                score_labels=["high"],
+                tracking_statuses=["review"],
                 change_types=["retraction_notice"],
                 sort_by="title_asc",
             )
 
             self.assertEqual(filtered["metrics"]["papers"], 1)
             self.assertEqual(filtered["metrics"]["changes"], 1)
-            self.assertEqual(filtered["focus_cards"][0]["title"], "Retraction Note: Vesicle delivery study")
-            self.assertEqual(filtered["focus_cards"][0]["abstract"], "This article has been retracted.")
-            self.assertEqual(filtered["focus_cards"][0]["tracking_status"], "priority")
+            self.assertEqual(
+                filtered["focus_cards"][0]["title"],
+                "Retraction Note: CRISPR synthetic biology vesicle delivery study",
+            )
+            self.assertEqual(
+                filtered["focus_cards"][0]["abstract"],
+                "This retracted synthetic biology article uses CRISPR tools.",
+            )
+            self.assertEqual(filtered["focus_cards"][0]["tracking_status"], "review")
 
     def test_build_filter_options_collects_current_snapshot_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,8 +100,9 @@ class PresentationTests(unittest.TestCase):
                         journal_name="Source B",
                         listing_url="https://example.com/b/articles",
                         article_url="https://example.com/b/1",
-                        title="Retraction Note: Vesicle delivery study",
-                        abstract="This article has been retracted.",
+                        title="Retraction Note: CRISPR synthetic biology vesicle delivery study",
+                        authors="Jay Keasling; Other Author",
+                        abstract="This retracted synthetic biology article uses CRISPR tools.",
                         doi="10.1000/b1",
                         collector_kind="html",
                     ),
@@ -109,9 +116,9 @@ class PresentationTests(unittest.TestCase):
             options = build_filter_options(snapshot)
 
             self.assertIn("watchlist", options["tracking_statuses"])
-            self.assertIn("priority", options["tracking_statuses"])
-            self.assertIn("low", options["score_labels"])
-            self.assertIn("high", options["score_labels"])
+            self.assertIn("review", options["tracking_statuses"])
+            self.assertNotIn("priority", options["tracking_statuses"])
+            self.assertNotIn("score_labels", options)
             self.assertIn("new_paper", options["change_types"])
             self.assertIn("retraction_notice", options["change_types"])
             self.assertIn("crispr", options["themes"])

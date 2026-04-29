@@ -49,7 +49,7 @@ class BuildInsightsTaskTests(unittest.TestCase):
             self.assertEqual(insights[0]["score_label"], "low")
             self.assertEqual(tracking_items[0]["tracking_status"], "watchlist")
 
-    def test_build_insights_marks_retraction_as_priority(self) -> None:
+    def test_build_insights_does_not_mark_retraction_alone_for_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "test.db"
             repository = SQLiteRepository(db_path)
@@ -75,11 +75,41 @@ class BuildInsightsTaskTests(unittest.TestCase):
             insights = repository.fetch_paper_insights()
             tracking_items = repository.fetch_tracking_items()
 
-            high_insights = [item for item in insights if item["score_label"] == "high"]
-            priority_items = [item for item in tracking_items if item["tracking_status"] == "priority"]
+            self.assertEqual(insights[0]["score_label"], "low")
+            self.assertEqual(tracking_items[0]["tracking_status"], "watchlist")
+            self.assertEqual(insights[0]["metadata"]["score_factors"]["change_type"], 0.2)
 
-            self.assertTrue(high_insights)
-            self.assertTrue(priority_items)
+    def test_build_insights_marks_author_and_theme_match_for_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "test.db"
+            repository = SQLiteRepository(db_path)
+            repository.initialize()
+            repository.upsert_raw_records(
+                [
+                    RawRecord(
+                        source_name="Test Journal",
+                        journal_name="Test Journal",
+                        listing_url="https://example.com/articles",
+                        article_url="https://example.com/article/8",
+                        title="CRISPR synthetic biology platform paper",
+                        authors="Jay Keasling; Other Author",
+                        abstract="A synthetic biology paper about CRISPR delivery.",
+                        doi="10.1000/review-priority",
+                        collector_kind="html",
+                    )
+                ]
+            )
+            run_process_stage(db_path=db_path)
+            run_change_detection(db_path=db_path)
+
+            run_insight_build(db_path=db_path)
+            insights = repository.fetch_paper_insights()
+            tracking_items = repository.fetch_tracking_items()
+
+            self.assertEqual(insights[0]["score_label"], "high")
+            self.assertEqual(tracking_items[0]["tracking_status"], "review")
+            self.assertGreaterEqual(insights[0]["metadata"]["score_factors"]["theme_hits"], 0.2)
+            self.assertEqual(insights[0]["metadata"]["score_factors"]["author_hits"], 0.4)
 
     def test_build_insights_boosts_watchlisted_author(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -16,6 +16,11 @@ SORT_OPTIONS = {
     "source_asc": "Source (A-Z)",
 }
 
+PRIORITY_REVIEW_THRESHOLD = 0.85
+TRACKING_STATUS_ALIASES = {
+    "priority": "review",
+}
+
 
 def build_snapshot(
     repository: SQLiteRepository,
@@ -37,6 +42,7 @@ def build_snapshot(
         paper = papers_by_id.get(paper_id)
         if paper is None:
             continue
+        tracking_status = _tracking_status_label(tracking["tracking_status"])
         latest_change = changes_by_paper.get(paper_id, [None])[0]
         best_insight = insights_by_paper.get(paper_id, [None])[0]
         focus_cards.append(
@@ -49,7 +55,7 @@ def build_snapshot(
                 "published_at": paper.published_at,
                 "doi": paper.doi,
                 "article_url": paper.article_url,
-                "tracking_status": tracking["tracking_status"],
+                "tracking_status": tracking_status,
                 "priority_score": tracking["priority_score"],
                 "note": tracking["note"],
                 "latest_change_type": getattr(latest_change, "change_type", None),
@@ -57,8 +63,6 @@ def build_snapshot(
                 "latest_change_at": getattr(latest_change, "detected_at", None),
                 "insight_summary": best_insight["summary"] if best_insight else None,
                 "insight_reason": best_insight["reason"] if best_insight else None,
-                "score": best_insight["score"] if best_insight else None,
-                "score_label": best_insight["score_label"] if best_insight else None,
                 "themes": tracking["metadata"].get("themes", [])
                 if tracking.get("metadata")
                 else [],
@@ -73,7 +77,9 @@ def build_snapshot(
         insights,
     )
     change_breakdown = Counter(change.change_type for change in changes)
-    tracking_breakdown = Counter(item["tracking_status"] for item in tracking_items)
+    tracking_breakdown = Counter(
+        _tracking_status_label(item["tracking_status"]) for item in tracking_items
+    )
 
     return {
         "metrics": {
@@ -128,7 +134,6 @@ def build_markdown_report(
                     f"- Status: `{card['tracking_status']}`",
                     f"- Priority Score: `{card['priority_score']}`",
                     f"- Latest Change: `{card['latest_change_type'] or 'n/a'}`",
-                    f"- Insight Score: `{card['score_label'] or 'n/a'}`",
                     f"- Summary: {card['insight_summary'] or card['latest_change_summary'] or 'n/a'}",
                     f"- Reason: {card['insight_reason'] or card['note'] or 'n/a'}",
                     f"- URL: {card['article_url'] or 'n/a'}",
@@ -167,9 +172,6 @@ def build_filter_options(snapshot: dict[str, Any]) -> dict[str, list[str]]:
                 if card.get("tracking_status")
             }
         ),
-        "score_labels": sorted(
-            {card["score_label"] for card in snapshot["focus_cards"] if card.get("score_label")}
-        ),
         "change_types": sorted(
             {change.change_type for change in snapshot["changes"] if change.change_type}
         ),
@@ -189,14 +191,12 @@ def build_filtered_snapshot(
     *,
     query: str = "",
     tracking_statuses: list[str] | None = None,
-    score_labels: list[str] | None = None,
     change_types: list[str] | None = None,
     themes: list[str] | None = None,
     min_priority: float = 0.0,
     sort_by: str = "priority_desc",
 ) -> dict[str, Any]:
     tracking_status_set = set(tracking_statuses or [])
-    score_label_set = set(score_labels or [])
     change_type_set = set(change_types or [])
     theme_set = set(themes or [])
 
@@ -214,7 +214,6 @@ def build_filtered_snapshot(
             card,
             query=query,
             tracking_statuses=tracking_status_set,
-            score_labels=score_label_set,
             themes=theme_set,
             min_priority=min_priority,
         )
@@ -259,7 +258,10 @@ def build_filtered_snapshot(
         ),
         "change_breakdown": dict(Counter(change.change_type for change in filtered_changes)),
         "tracking_breakdown": dict(
-            Counter(item["tracking_status"] for item in filtered_tracking_items)
+            Counter(
+                _tracking_status_label(item["tracking_status"])
+                for item in filtered_tracking_items
+            )
         ),
         "papers": filtered_papers,
         "changes": filtered_changes,
@@ -301,7 +303,6 @@ def build_tracking_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "published_at": card["published_at"],
             "tracking_status": card["tracking_status"],
             "priority_score": card["priority_score"],
-            "score_label": card["score_label"],
             "latest_change_type": card["latest_change_type"],
             "themes": ", ".join(card["themes"]),
             "article_url": card["article_url"],
@@ -326,8 +327,7 @@ def build_change_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "change_type": change.change_type,
                 "change_summary": change.summary,
                 "detected_at": change.detected_at,
-                "score": insight["score"] if insight else None,
-                "score_label": insight["score_label"] if insight else None,
+                "priority_score": insight["score"] if insight else None,
                 "themes": ", ".join((insight or {}).get("metadata", {}).get("themes", [])),
                 "reason": insight["reason"] if insight else "",
                 "article_url": paper.article_url if paper else "",
@@ -349,7 +349,11 @@ def build_new_paper_batch_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]
     for batch_date, batch_rows in rows_by_date.items():
         paper_ids = {row["paper_id"] for row in batch_rows}
         source_names = {row["source_name"] for row in batch_rows if row["source_name"]}
-        priority_items = sum(1 for row in batch_rows if row["tracking_status"] == "priority")
+        priority_items = sum(
+            1
+            for row in batch_rows
+            if float(row["priority_score"] or 0) >= PRIORITY_REVIEW_THRESHOLD
+        )
         batches.append(
             {
                 "batch_date": batch_date,
@@ -397,6 +401,9 @@ def build_new_paper_rows(
         tracking_metadata = tracking.get("metadata", {}) if tracking else {}
         themes = insight_metadata.get("themes") or tracking_metadata.get("themes", [])
         themes_text = ", ".join(themes) if isinstance(themes, list) else str(themes or "")
+        priority_score = tracking.get("priority_score") if tracking else None
+        if priority_score is None and insight:
+            priority_score = insight["score"]
         rows.append(
             {
                 "batch_date": change_date,
@@ -407,9 +414,12 @@ def build_new_paper_rows(
                 "title": paper.canonical_title if paper else "",
                 "doi": paper.doi if paper else "",
                 "published_at": paper.published_at if paper else "",
-                "score": insight["score"] if insight else None,
-                "score_label": insight["score_label"] if insight else "",
-                "tracking_status": tracking.get("tracking_status", "") if tracking else "",
+                "priority_score": priority_score,
+                "tracking_status": _tracking_status_label(
+                    tracking.get("tracking_status", "")
+                )
+                if tracking
+                else "",
                 "themes": themes_text,
                 "reason": insight["reason"] if insight else "",
                 "article_url": paper.article_url if paper else "",
@@ -421,7 +431,7 @@ def build_new_paper_rows(
         key=lambda row: (
             row["batch_date"],
             str(row["detected_at"] or ""),
-            float(row["score"] or 0),
+            float(row["priority_score"] or 0),
             row["title"].casefold(),
         ),
         reverse=True,
@@ -430,17 +440,10 @@ def build_new_paper_rows(
 
 def build_paper_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     tracking_by_paper = {item["paper_id"]: item for item in snapshot["tracking_items"]}
-    insight_by_paper: dict[int, dict[str, Any]] = {}
-    for insight in snapshot["insights"]:
-        paper_id = insight["paper_id"]
-        current = insight_by_paper.get(paper_id)
-        if current is None or float(insight["score"] or 0) > float(current["score"] or 0):
-            insight_by_paper[paper_id] = insight
 
     rows: list[dict[str, Any]] = []
     for paper in snapshot["papers"]:
         tracking = tracking_by_paper.get(paper.id)
-        insight = insight_by_paper.get(paper.id)
         rows.append(
             {
                 "paper_id": paper.id,
@@ -450,9 +453,10 @@ def build_paper_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "doi": paper.doi,
                 "published_at": paper.published_at,
                 "status": paper.status,
-                "tracking_status": tracking["tracking_status"] if tracking else "",
+                "tracking_status": _tracking_status_label(tracking["tracking_status"])
+                if tracking
+                else "",
                 "priority_score": tracking["priority_score"] if tracking else None,
-                "score_label": insight["score_label"] if insight else "",
                 "themes": ", ".join((tracking or {}).get("metadata", {}).get("themes", [])),
                 "article_url": paper.article_url,
             }
@@ -509,7 +513,7 @@ def _build_source_summary(
     priority_counter = Counter(
         item["source_name"]
         for item in tracking_items
-        if item["tracking_status"] == "priority"
+        if _is_priority_item(item)
     )
     insight_counter = Counter(item["source_name"] for item in insights)
     all_sources = sorted(
@@ -534,13 +538,10 @@ def _card_matches(
     *,
     query: str,
     tracking_statuses: set[str],
-    score_labels: set[str],
     themes: set[str],
     min_priority: float,
 ) -> bool:
     if tracking_statuses and card["tracking_status"] not in tracking_statuses:
-        return False
-    if score_labels and (card["score_label"] or "") not in score_labels:
         return False
     if themes and not themes.intersection(set(card["themes"] or [])):
         return False
@@ -564,6 +565,18 @@ def _card_matches(
         )
     ).casefold()
     return normalized_query in text_blob
+
+
+def _tracking_status_label(value: object) -> str:
+    status = str(value or "").strip()
+    return TRACKING_STATUS_ALIASES.get(status.casefold(), status)
+
+
+def _is_priority_item(item: dict[str, Any]) -> bool:
+    try:
+        return float(item.get("priority_score") or 0) >= PRIORITY_REVIEW_THRESHOLD
+    except (TypeError, ValueError):
+        return False
 
 
 def _count_existing_papers_before_batch(

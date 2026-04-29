@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from bs4 import BeautifulSoup
+import re
+
+from bs4 import BeautifulSoup, NavigableString, Tag
 import feedparser
 
 from ..models import RawRecord, SourceConfig
@@ -92,3 +94,47 @@ class CIPCollector(BaseCollector):
             if limit and len(records) >= limit:
                 break
         return self.dedupe_by_article_url(records)
+
+    @classmethod
+    def abstract_contents(cls, soup: BeautifulSoup) -> list[str]:
+        values = [*super().abstract_contents(soup), *cls._magtech_abstract_contents(soup)]
+        return sorted(cls.dedupe_text_values(values), key=cls._abstract_sort_key, reverse=True)
+
+    @classmethod
+    def _magtech_abstract_contents(cls, soup: BeautifulSoup) -> list[str]:
+        values: list[str] = []
+        for panel in soup.select("#collapseOne .panel-body"):
+            label = panel.find(
+                "strong",
+                string=lambda value: bool(value and re.search(r"摘要|abstract", value, re.I)),
+            )
+            if label is None:
+                continue
+
+            parts: list[str] = []
+            for element in label.next_elements:
+                if isinstance(element, Tag):
+                    text = cls.clean_text(element.get_text(" ", strip=True))
+                    if element.name == "form":
+                        break
+                    if element.name == "strong" and re.search(r"关键词|key\s*words?", text, re.I):
+                        break
+                    continue
+                if not isinstance(element, NavigableString) or element.parent is label:
+                    continue
+
+                text = cls.clean_text(str(element))
+                if not text or re.fullmatch(r"(摘要|abstract)\s*[:：]?", text, re.I):
+                    continue
+                if re.match(r"(关键词|key\s*words?)\s*[:：]?", text, re.I):
+                    break
+                parts.append(text)
+
+            abstract = cls.clean_text(" ".join(parts))
+            if abstract:
+                values.append(cls._strip_abstract_heading(abstract))
+        return values
+
+    @staticmethod
+    def _abstract_sort_key(value: str) -> tuple[bool, int]:
+        return (not value.rstrip().endswith(("...", "…")), len(value))

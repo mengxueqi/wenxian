@@ -5,6 +5,7 @@ import unittest
 from bs4 import BeautifulSoup
 
 from literature_tracker.collectors.base import BaseCollector, CollectorError
+from literature_tracker.collectors.cip import CIPCollector
 from literature_tracker.models import RawRecord, SourceConfig
 
 
@@ -110,6 +111,31 @@ class CollectorHelperTests(unittest.TestCase):
         self.assertEqual(
             BaseCollector.abstract_contents(soup)[0],
             "This is the full abstract text with more detail than the metadata.",
+        )
+
+    def test_cip_abstract_contents_extracts_magtech_panel_abstract(self) -> None:
+        html = """
+        <html>
+          <head>
+            <meta name="Description" xml:lang="en" content="High-throughput genome editing is an effective approach to rapidly ana..." />
+          </head>
+          <body>
+            <div id="collapseOne">
+              <div class="panel-body line-height text-justify">
+                <p><strong>摘要： </strong><p>高通量基因组编辑是快速分析大量基因突变功能和进行遗传育种的有效方法。本文主要介绍基于CRISPR系统的高通量基因组编辑方法。</p></p>
+                <form>
+                  <p><strong>关键词: </strong>CRISPR, 基因组编辑</p>
+                </form>
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        self.assertEqual(
+            CIPCollector.abstract_contents(soup)[0],
+            "高通量基因组编辑是快速分析大量基因突变功能和进行遗传育种的有效方法。本文主要介绍基于CRISPR系统的高通量基因组编辑方法。",
         )
 
 

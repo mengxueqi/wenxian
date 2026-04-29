@@ -142,18 +142,19 @@ THEME_KEYWORDS = {
 }
 
 CHANGE_BASE_SCORES = {
-    "new_paper": 0.25,
-    "content_updated": 0.45,
-    "correction_notice": 0.75,
-    "retraction_notice": 0.9,
+    "new_paper": 0.05,
+    "content_updated": 0.1,
+    "correction_notice": 0.16,
+    "retraction_notice": 0.2,
 }
 
-RECENT_ACTIVITY_SCORE = 0.1
-THEME_SCORE_PER_HIT = 0.12
-THEME_SCORE_CAP = 0.36
-AUTHOR_HIT_BASE_SCORE = 0.25
-AUTHOR_HIT_EXTRA_SCORE = 0.05
-AUTHOR_HIT_SCORE_CAP = 0.35
+DEFAULT_CHANGE_BASE_SCORE = 0.12
+RECENT_ACTIVITY_SCORE = 0.2
+THEME_SCORE_PER_HIT = 0.15
+THEME_SCORE_CAP = 0.4
+AUTHOR_HIT_BASE_SCORE = 0.4
+AUTHOR_HIT_EXTRA_SCORE = 0.0
+AUTHOR_HIT_SCORE_CAP = 0.4
 
 CHANGE_SUMMARY_PREFIX = {
     "new_paper": "新增文献",
@@ -297,7 +298,7 @@ def _score_change(
     themes: list[str],
     author_hits: list[str],
 ) -> tuple[float, dict[str, float]]:
-    score = CHANGE_BASE_SCORES.get(change.change_type, 0.55)
+    score = CHANGE_BASE_SCORES.get(change.change_type, DEFAULT_CHANGE_BASE_SCORE)
     factors = {"change_type": score}
     theme_score = min(THEME_SCORE_CAP, THEME_SCORE_PER_HIT * len(themes))
     score += theme_score
@@ -327,7 +328,7 @@ def _score_label(score: float) -> str:
 
 def _tracking_status(score_label: str) -> str:
     if score_label == "high":
-        return "priority"
+        return "review"
     if score_label == "medium":
         return "pending"
     return "watchlist"
