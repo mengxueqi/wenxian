@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from io import StringIO
 from typing import Any
 
@@ -53,6 +54,8 @@ def build_snapshot(
                 "source_name": paper.source_name,
                 "journal_name": paper.journal_name,
                 "published_at": paper.published_at,
+                "created_at": paper.created_at,
+                "updated_at": paper.updated_at,
                 "doi": paper.doi,
                 "article_url": paper.article_url,
                 "tracking_status": tracking_status,
@@ -291,6 +294,23 @@ def sort_focus_cards(cards: list[dict[str, Any]], *, sort_by: str) -> list[dict[
     reverse = sort_by in {"priority_desc", "published_desc"}
     key_fn = sorters.get(sort_by, sorters["priority_desc"])
     return sorted(cards, key=key_fn, reverse=reverse)
+
+
+def build_recent_focus_cards(
+    snapshot: dict[str, Any],
+    *,
+    days: int = 30,
+    limit: int = 10,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    current_time = now or datetime.now()
+    window = timedelta(days=days)
+    recent_cards = [
+        card
+        for card in snapshot["focus_cards"]
+        if _is_recent_card(card, now=current_time, window=window)
+    ]
+    return sort_focus_cards(recent_cards, sort_by="priority_desc")[:limit]
 
 
 def build_tracking_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -577,6 +597,31 @@ def _is_priority_item(item: dict[str, Any]) -> bool:
         return float(item.get("priority_score") or 0) >= PRIORITY_REVIEW_THRESHOLD
     except (TypeError, ValueError):
         return False
+
+
+def _is_recent_card(
+    card: dict[str, Any],
+    *,
+    now: datetime,
+    window: timedelta,
+) -> bool:
+    created_at = _parse_datetime(card.get("created_at"))
+    if created_at is None:
+        return False
+    age = now - created_at
+    return timedelta(0) <= age <= window
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y-%m", "%Y/%m/%d", "%Y/%m"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def _count_existing_papers_before_batch(

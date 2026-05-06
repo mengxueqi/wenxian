@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from literature_tracker.presentation import (
     build_filtered_snapshot,
     build_new_paper_batch_rows,
     build_new_paper_rows,
+    build_recent_focus_cards,
     build_snapshot,
     rows_to_csv_bytes,
 )
@@ -138,6 +140,39 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("title,themes,metadata", payload)
         self.assertIn("crispr, synthetic_biology", payload)
         self.assertIn("Source A", payload)
+
+    def test_build_recent_focus_cards_returns_top_recent_cards_by_priority(self) -> None:
+        snapshot = {
+            "focus_cards": [
+                {
+                    "paper_id": index,
+                    "title": f"Recent Paper {index}",
+                    "published_at": "2026-04-20",
+                    "created_at": f"2026-04-{20 + index % 5:02d}T09:00:00",
+                    "priority_score": index / 100,
+                }
+                for index in range(1, 13)
+            ]
+            + [
+                {
+                    "paper_id": 99,
+                    "title": "Old High Score Paper",
+                    "published_at": "2026-03-01",
+                    "created_at": "2026-03-01T09:00:00",
+                    "priority_score": 0.99,
+                }
+            ]
+        }
+
+        cards = build_recent_focus_cards(
+            snapshot,
+            now=datetime(2026, 5, 6, 9, 0, 0),
+        )
+
+        self.assertEqual(len(cards), 10)
+        self.assertEqual(cards[0]["title"], "Recent Paper 12")
+        self.assertEqual(cards[-1]["title"], "Recent Paper 3")
+        self.assertNotIn("Old High Score Paper", {card["title"] for card in cards})
 
     def test_new_paper_batches_group_by_detected_date_and_dedupe_papers(self) -> None:
         snapshot = {

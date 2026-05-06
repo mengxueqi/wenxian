@@ -15,6 +15,7 @@ from ..presentation import (
     build_new_paper_batch_rows,
     build_new_paper_rows,
     build_paper_rows,
+    build_recent_focus_cards,
     build_snapshot,
     build_tracking_rows,
     rows_to_csv_bytes,
@@ -96,9 +97,17 @@ def render_app(db_path: Path = DB_PATH) -> None:
     metric_columns[2].metric("Insights", metrics["insights"])
     metric_columns[3].metric("Tracking", metrics["tracking_items"])
 
-    tabs = st.tabs(["Library", "Dashboard", "Change Analysis"])
+    tabs = st.tabs(["Focus", "Library", "Dashboard", "Change Analysis"])
 
     with tabs[0]:
+        focus_cards = build_recent_focus_cards(all_snapshot, days=30, limit=10)
+        if focus_cards:
+            for card in focus_cards:
+                _render_literature_card(card)
+        else:
+            st.info("No focus papers entered the library in the last 30 days.")
+
+    with tabs[1]:
         source_options = [
             "All Sources",
             *[row["source_name"] for row in all_snapshot["source_summary"]],
@@ -177,42 +186,11 @@ def render_app(db_path: Path = DB_PATH) -> None:
 
         if library_filtered_snapshot["focus_cards"]:
             for card in library_filtered_snapshot["focus_cards"]:
-                with st.container(border=True):
-                    st.markdown(
-                        "<div style='font-size: 1.08rem; font-weight: 650; "
-                        f"line-height: 1.35;'>{escape(card['title'])}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.caption(
-                        f"{card['source_name']} | {card['journal_name']} | "
-                        f"{card['published_at'] or 'unknown date'}"
-                    )
-                    meta_columns = st.columns(2)
-                    with meta_columns[0]:
-                        _render_compact_metric(
-                            "Priority",
-                            f"{float(card['priority_score'] or 0):.2f}",
-                        )
-                    with meta_columns[1]:
-                        _render_compact_metric("Status", card["tracking_status"] or "n/a")
-                    abstract_preview, abstract_rest = _split_leading_sentences(
-                        card["abstract"] or "",
-                        sentence_count=2,
-                    )
-                    st.write(abstract_preview)
-                    if abstract_rest:
-                        with st.expander("More abstract"):
-                            st.write(abstract_rest)
-                    st.write(
-                        "Keywords: "
-                        + (", ".join(card["themes"]) if card["themes"] else "n/a")
-                    )
-                    if card["article_url"]:
-                        st.markdown(f"[Open Article]({card['article_url']})")
+                _render_literature_card(card)
         else:
             st.info("No tracking items match the current filters.")
 
-    with tabs[1]:
+    with tabs[2]:
         summary_columns = st.columns(3)
         with summary_columns[0]:
             st.markdown("#### Source Summary")
@@ -253,7 +231,7 @@ def render_app(db_path: Path = DB_PATH) -> None:
             else:
                 st.info("No visible tracking items.")
 
-    with tabs[2]:
+    with tabs[3]:
         new_paper_batches = build_new_paper_batch_rows(all_snapshot)
         if new_paper_batches:
             batch_labels = [
@@ -325,6 +303,42 @@ def _run_one_click_crawl(db_path: Path) -> dict[str, int]:
         "changes": int(change_summary["detected_changes"]),
         "tracking_items": int(insight_summary["upserted_tracking_items"]),
     }
+
+
+def _render_literature_card(card: dict[str, object]) -> None:
+    with st.container(border=True):
+        st.markdown(
+            "<div style='font-size: 1.08rem; font-weight: 650; "
+            f"line-height: 1.35;'>{escape(str(card['title']))}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"{card['source_name']} | {card['journal_name']} | "
+            f"{card['published_at'] or 'unknown date'}"
+        )
+        meta_columns = st.columns(2)
+        with meta_columns[0]:
+            _render_compact_metric(
+                "Priority",
+                f"{float(card['priority_score'] or 0):.2f}",
+            )
+        with meta_columns[1]:
+            _render_compact_metric("Status", str(card["tracking_status"] or "n/a"))
+        abstract_preview, abstract_rest = _split_leading_sentences(
+            str(card["abstract"] or ""),
+            sentence_count=2,
+        )
+        st.write(abstract_preview)
+        if abstract_rest:
+            with st.expander("More abstract"):
+                st.write(abstract_rest)
+        themes = card.get("themes", [])
+        st.write(
+            "Keywords: "
+            + (", ".join(str(theme) for theme in themes) if themes else "n/a")
+        )
+        if card["article_url"]:
+            st.markdown(f"[Open Article]({card['article_url']})")
 
 
 def _render_compact_metric(label: str, value: str) -> None:

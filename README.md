@@ -1,142 +1,171 @@
 # Literature Tracker
 
-文献追踪项目第一阶段骨架，目标是先把以下链路打通：
+用于跟踪指定期刊/网站的新文献、内容变化、勘误/撤稿信号，并在 Streamlit UI 中维护一个按评分排序的文献关注队列。
 
-- 从 [文献源.csv](/D:/codex/wenxian/文献源.csv) 读取来源配置
-- 为不同平台选择对应的 collector
-- 抓取原始文献条目
-- 将抓取结果写入 SQLite
-- 预留 `papers / paper_changes / paper_insights / tracking_items` 四层数据表
+## 功能概览
 
-当前已纳入的来源：
+- 抓取配置源中的最新文献记录。
+- 将原始记录规范化为文献库 `papers`。
+- 检测新文献、内容更新、勘误、撤稿等变化。
+- 根据变化类型、主题命中、重点作者命中、近期入库活跃度计算 `priority_score`。
+- 提供 Streamlit UI：
+  - `Focus`：最近 30 天入库、评分最高的 10 篇文献。
+  - `Library`：完整文献队列，支持来源、状态、变化类型、关键词、最低分筛选。
+  - `Dashboard`：来源、变化、跟踪状态概览。
+  - `Change Analysis`：按批次查看新文献。
+- 导出 Tracking CSV、Changes CSV、Papers CSV 和 Markdown 报告。
 
-- `合成生物学`
-- `Advanced Biotechnology`
-- `Journal of Biological Engineering`
+## 当前跟踪源
 
-## 当前状态
+配置文件：[文献源.csv](./文献源.csv)
 
-第一阶段已实现：
+| 来源 | 网站 | 平台 | 抓取入口 | 说明 |
+|---|---|---|---|---|
+| 合成生物学 | `https://synbioj.cip.com.cn/CN/2096-8280/home.shtml` | `magtech_cip` | RSS `rss_zxly_2096-8280.xml` | RSS 优先，失败时回退最新文章列表；详情页补 DOI、作者、摘要、PDF |
+| Advanced Biotechnology | `https://link.springer.com/journal/44307` | `springer` | `/articles` | Springer 列表页 + 详情页 citation meta |
+| Journal of Biological Engineering | `https://link.springer.com/journal/13036` | `springer` | `/online-first` | online-first 优先，必要时 fallback 到 `/articles` |
 
-- 项目骨架和模块目录
-- `SourceConfig` 配置加载
-- SQLite Repository 和基础 schema
-- `magtech_cip` 与 `springer` collector 框架
-- `crawl` CLI
+## 新电脑部署
 
-第二阶段已实现：
-
-- `raw_records -> papers` 归一化流程
-- `process` CLI
-- `papers` 表的基础主字段和迁移回填
-
-第三阶段已实现：
-
-- `papers -> paper_changes` 变化检测流程
-- `detect-changes` CLI
-- `new_paper / content_updated / correction_notice / retraction_notice` 基础规则
-
-第四阶段已实现：
-
-- `paper_changes -> paper_insights / tracking_items`
-- `build-insights` CLI
-- 基于变化类型、主题信号和近期活跃度的摘要、理由、评分和追踪优先级
-
-第五阶段已实现：
-
-- `build-report` Markdown 报告生成
-- `ui_app.py` 本地 Streamlit 界面
-- Dashboard / Change Analysis / Tracking Queue / Papers / Report Preview 五个视图
-
-已知限制：
-
-- Springer 站点对非浏览器客户端可能返回 bot challenge，当前代码会显式报错并记录失败
-- 当前 UI 还是第一版浏览界面，后续可以继续做更强的筛选、排序和导出
-
-## 环境
-
-- Python `>=3.12`
-- 依赖见 [pyproject.toml](/D:/codex/wenxian/pyproject.toml)
-
-当前项目已经建立独立虚拟环境：
-
-- `.venv`
-
-如果需要在新机器或重建环境时重新创建，可执行：
+推荐使用 Conda / Miniconda。
 
 ```powershell
-C:\ugene-53.0\tools\python3\python.exe -m venv D:\codex\wenxian\.venv
-D:\codex\wenxian\.venv\Scripts\python.exe -m pip install -e D:\codex\wenxian
-D:\codex\wenxian\.venv\Scripts\python.exe -m pip install "streamlit>=1.44,<2"
+git clone <repo-url> wenxian
+cd wenxian
+conda env create -f environment.yml
+conda activate literature-tracker
 ```
 
-激活方式：
+如果已经有环境，也可以手动安装：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[ui]"
 ```
-
-## 快速开始
 
 初始化数据库：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli init-db
+python -m literature_tracker.cli init-db
 ```
 
-抓取全部启用来源：
+如果要迁移旧电脑已有数据，请把旧电脑的 `data/` 目录复制到新电脑项目根目录。最关键文件是：
+
+```text
+data/literature_tracker.db
+data/reports/latest_report.md
+```
+
+`data/` 被 `.gitignore` 忽略，不会随 git 自动同步。
+
+## 常用命令
+
+完整流水线：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli crawl
+python -m literature_tracker.cli crawl
+python -m literature_tracker.cli process
+python -m literature_tracker.cli detect-changes
+python -m literature_tracker.cli build-insights
+python -m literature_tracker.cli build-report
 ```
 
-把 `raw_records` 归一化到 `papers`：
+只抓取某个来源：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli process
+python -m literature_tracker.cli crawl --source "合成生物学"
+python -m literature_tracker.cli process --source "合成生物学"
+python -m literature_tracker.cli detect-changes --source "合成生物学"
+python -m literature_tracker.cli build-insights --source "合成生物学"
+python -m literature_tracker.cli build-report --source "合成生物学"
 ```
 
-从 `papers` 生成 `paper_changes`：
+启动 UI：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli detect-changes
+streamlit run ui_app.py
 ```
 
-从 `paper_changes` 生成 `paper_insights` 和 `tracking_items`：
+运行测试：
 
 ```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli build-insights
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -m unittest discover -s tests
 ```
 
-生成 Markdown 报告：
+## 评分体系
 
-```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli build-report
+评分在 [literature_tracker/insights/build.py](./literature_tracker/insights/build.py) 中实现。
+
+```text
+priority_score =
+  change_base_score
+  + theme_score
+  + author_score
+  + recent_activity_score
+
+final_score = round(min(priority_score, 0.99), 2)
 ```
 
-启动本地 UI：
+当前权重：
 
-```powershell
-D:\codex\wenxian\.venv\Scripts\streamlit.exe run D:\codex\wenxian\ui_app.py
+```text
+change_base_score 最高 0.20
+- new_paper: 0.05
+- content_updated: 0.10
+- correction_notice: 0.16
+- retraction_notice: 0.20
+- 其他: 0.12
+
+theme_score = min(0.40, 0.15 * 命中主题数)
+
+author_score = 0.40，只要命中重点作者列表
+
+recent_activity_score = 0.20，最近 30 天内入库/更新
 ```
 
-只抓一个来源，限制 5 条：
+分档：
 
-```powershell
-D:\codex\wenxian\.venv\Scripts\python.exe -m literature_tracker.cli crawl --source "合成生物学" --limit 5
+```text
+score >= 0.85 -> high -> review
+score >= 0.65 -> medium -> pending
+score < 0.65 -> low -> watchlist
 ```
 
-## 目录
+## 项目结构
 
-- [literature_tracker](/D:/codex/wenxian/literature_tracker): 主包
-- [literature_tracker/collectors](/D:/codex/wenxian/literature_tracker/collectors): 来源采集器
-- [literature_tracker/storage](/D:/codex/wenxian/literature_tracker/storage): SQLite 仓储
-- [literature_tracker/tasks](/D:/codex/wenxian/literature_tracker/tasks): 分阶段任务入口
-- [ui_app.py](/D:/codex/wenxian/ui_app.py): Streamlit 入口
-- [tests](/D:/codex/wenxian/tests): 离线单元测试
+```text
+literature_tracker/
+  collectors/      # 网站采集器：CIP/Magtech、Springer
+  detectors/       # 变化检测
+  insights/        # 摘要、理由、评分和 tracking item 构建
+  processors/      # raw_records -> papers 规范化
+  storage/         # SQLite schema 和 repository
+  tasks/           # CLI 任务编排
+  ui/              # Streamlit 应用
+tests/             # 单元测试
+config/            # 作者 watchlist 等配置
+data/              # SQLite 数据库和报告，git 忽略
+```
 
-## 下一阶段
+## 数据说明
 
-- `ui`: 增加更细的筛选、排序、搜索和导出
-- `report`: 增加日报/周报模板与自动化调度
-- `insights`: 引入更细的主题标签和更强的评分规则
+SQLite 数据库默认位于：
+
+```text
+data/literature_tracker.db
+```
+
+核心表：
+
+- `sources`：跟踪源配置快照。
+- `raw_records`：采集到的原始文献记录。
+- `papers`：规范化后的文献。
+- `paper_changes`：新文献、内容更新、勘误、撤稿等变化记录。
+- `paper_insights`：每条变化对应的评分、摘要、理由和元数据。
+- `tracking_items`：每篇文献当前应关注的最高优先级记录。
+
+## 注意事项
+
+- Springer 页面有时会缺少标准摘要，特别是 `Publisher Correction` 或 commentary 类型页面。
+- `合成生物学` 的 Magtech/CIP 页面完整摘要位于页面正文的 `摘要/Abstract` 面板中，采集器已做专门解析。
+- 新电脑迁移时，代码可以走 git；数据库和报告需要单独复制 `data/`。
