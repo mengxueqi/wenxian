@@ -324,19 +324,36 @@ def _render_literature_card(card: dict[str, object]) -> None:
             )
         with meta_columns[1]:
             _render_compact_metric("Status", str(card["tracking_status"] or "n/a"))
-        abstract_preview, abstract_rest = _split_leading_sentences(
-            str(card["abstract"] or ""),
-            sentence_count=2,
-        )
-        st.write(abstract_preview)
+        abstract = str(card["abstract"] or "")
+        source_summary = str(card.get("source_summary") or "")
+        if abstract:
+            expander_label = "More abstract"
+            abstract_preview, abstract_rest = _split_leading_sentences(
+                abstract,
+                sentence_count=2,
+            )
+            st.write(abstract_preview)
+        elif source_summary:
+            expander_label = "More source metadata"
+            abstract_preview, abstract_rest = _split_leading_sentences(
+                source_summary,
+                sentence_count=2,
+            )
+            st.caption("No abstract provided by source. Showing source metadata.")
+            st.write(abstract_preview)
+        else:
+            expander_label = "More abstract"
+            abstract_rest = ""
+            st.caption("No abstract provided by source.")
         if abstract_rest:
-            with st.expander("More abstract"):
+            with st.expander(expander_label):
                 st.write(abstract_rest)
+        keywords = card.get("keywords", [])
         themes = card.get("themes", [])
-        st.write(
-            "Keywords: "
-            + (", ".join(str(theme) for theme in themes) if themes else "n/a")
-        )
+        if keywords:
+            st.write("Keywords: " + ", ".join(str(keyword) for keyword in keywords))
+        if themes:
+            st.write("Themes: " + ", ".join(str(theme) for theme in themes))
         if card["article_url"]:
             st.markdown(f"[Open Article]({card['article_url']})")
 

@@ -21,9 +21,15 @@ class ConfigTests(unittest.TestCase):
 
     def test_load_existing_sources(self) -> None:
         sources = load_sources(SOURCES_CSV)
-        self.assertEqual(len(sources), 3)
+        self.assertEqual(len(sources), 13)
         self.assertEqual(sources[0].source_name, "合成生物学")
         self.assertEqual(sources[1].platform, "springer")
+        self.assertEqual(
+            [source.source_name for source in sources].count("Journal of Eukaryotic Microbiology"),
+            1,
+        )
+        self.assertIn("sciencedirect", {source.platform for source in sources})
+        self.assertIn("wiley", {source.platform for source in sources})
 
     def test_load_sources_supports_utf8_sig(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -40,4 +46,3 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

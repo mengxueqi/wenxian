@@ -36,11 +36,15 @@ class BaseCollector(ABC):
 
     def fetch_bytes(self, url: str) -> bytes:
         response = self.session.get(url, timeout=30)
+        if response.status_code in {403, 429}:
+            self.raise_for_known_blockers(response.text, url)
         response.raise_for_status()
         return response.content
 
     def fetch_html(self, url: str) -> str:
         response = self.session.get(url, timeout=30)
+        if response.status_code in {403, 429}:
+            self.raise_for_known_blockers(response.text, url)
         response.raise_for_status()
         self.raise_for_known_blockers(response.text, url)
         return response.text
@@ -52,6 +56,15 @@ class BaseCollector(ABC):
     def raise_for_known_blockers(html: str, url: str) -> None:
         lowered = html.lower()
         if "client challenge" in lowered and "javascript is disabled in your browser" in lowered:
+            raise CollectorError(
+                f"Source blocked non-browser access for {url}. "
+                "This source needs a browser-backed fetcher in the next iteration."
+            )
+        if "just a moment" in lowered and (
+            "cloudflare" in lowered
+            or "checking if the site connection is secure" in lowered
+            or "cf-browser-verification" in lowered
+        ):
             raise CollectorError(
                 f"Source blocked non-browser access for {url}. "
                 "This source needs a browser-backed fetcher in the next iteration."
@@ -91,6 +104,7 @@ class BaseCollector(ABC):
         author_values = self.meta_contents(soup, "citation_author")
         author_values.extend(self.meta_contents(soup, "citation_authors"))
         abstract_values = self.abstract_contents(soup)
+        keyword_values = self.keyword_contents(soup)
         journal_values = self.meta_contents(soup, "citation_journal_title")
         doi_values = self.meta_contents(soup, "citation_doi")
         language_values = self.meta_contents(soup, "citation_language")
@@ -108,6 +122,8 @@ class BaseCollector(ABC):
             record.journal_name = journal_values[0]
         if doi_values:
             record.doi = doi_values[0]
+        if keyword_values:
+            record.metadata["keywords"] = keyword_values
         if language_values:
             record.language = language_values[0]
         if publication_values:
@@ -171,6 +187,25 @@ class BaseCollector(ABC):
                     values.append(cls._strip_abstract_heading(text))
 
         return sorted(cls.dedupe_text_values(values), key=len, reverse=True)
+
+    @classmethod
+    def keyword_contents(cls, soup: BeautifulSoup) -> list[str]:
+        values: list[str] = []
+        for meta_name in (
+            "citation_keywords",
+            "citation_keyword",
+            "dc.subject",
+            "dc.Subject",
+            "dc.keywords",
+            "dc.Keywords",
+            "keywords",
+        ):
+            values.extend(cls.meta_contents(soup, meta_name))
+
+        split_values: list[str] = []
+        for value in values:
+            split_values.extend(re.split(r"\s*[;,]\s*|\s*\|\s*", value))
+        return cls.dedupe_text_values(split_values)
 
     @staticmethod
     def _strip_abstract_heading(value: str) -> str:

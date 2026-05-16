@@ -132,11 +132,23 @@ score < 0.65 -> watchlist
 - 进入详情页读取 citation meta 和常见摘要区域。
 - 有些 `Publisher Correction` 页面本身没有标准摘要，不应直接删除。
 
+### 通用期刊来源
+
+文件：`literature_tracker/collectors/generic.py`
+
+- 平台：`sciencedirect`、`oup`、`scientific_american`、`asm`、`cell`、`nature`、`microbiology_research`、`wiley`。
+- 优先解析 RSS/eTOC feed；HTML 页面按平台过滤文章链接，再进入详情页补 citation meta。
+- ScienceDirect RSS 不提供真实摘要；采集器会用 OpenAlex 尝试补 DOI、关键词和可用摘要。若仍无摘要，UI 显示来源元信息兜底，不把作者/日期误写成 abstract。
+- UI 中 `Keywords` 是出版社/外部元数据关键词；评分命中的主题另以 `Themes` 显示。
+- 已验证可读 RSS：ScienceDirect Metabolic Engineering、OUP Synthetic Biology、Cell Trends in Microbiology、Wiley Journal of Eukaryotic Microbiology、Wiley Yeast、Scientific American。
+- ASM 和 MicrobiologyResearch 在 requests 环境下返回 Cloudflare `Just a moment`；`文献源.csv` 中暂时标为 `blocked`，需要后续 browser-backed fetcher 才能稳定抓取。
+
 ## 已知注意事项
 
 - PowerShell 控制台有时会显示中文乱码，但文件本身是 UTF-8。
 - `data/reports/` 会不断生成历史报告；如果只需要最新报告，可以保留 `latest_report.md` 和最近一次 timestamp 报告。
 - `Publisher Correction` 类型文献可能没有摘要，但 DOI/URL 有效时仍保留。
+- 多个海外出版社对非浏览器请求有限制；采集器会给出 blocked non-browser access 错误，属于站点访问限制，不是数据结构损坏。
 - `literature_tracker.egg-info`、`__pycache__`、`.pytest_cache` 都是可删除缓存。
 
 ## 交接前检查清单

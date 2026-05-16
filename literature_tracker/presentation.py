@@ -44,6 +44,9 @@ def build_snapshot(
         if paper is None:
             continue
         tracking_status = _tracking_status_label(tracking["tracking_status"])
+        tracking_metadata = tracking.get("metadata") if tracking.get("metadata") else {}
+        paper_metadata = paper.metadata or {}
+        themes = tracking_metadata.get("themes", [])
         latest_change = changes_by_paper.get(paper_id, [None])[0]
         best_insight = insights_by_paper.get(paper_id, [None])[0]
         focus_cards.append(
@@ -66,9 +69,9 @@ def build_snapshot(
                 "latest_change_at": getattr(latest_change, "detected_at", None),
                 "insight_summary": best_insight["summary"] if best_insight else None,
                 "insight_reason": best_insight["reason"] if best_insight else None,
-                "themes": tracking["metadata"].get("themes", [])
-                if tracking.get("metadata")
-                else [],
+                "keywords": _metadata_keywords(paper_metadata),
+                "source_summary": _source_summary(paper_metadata),
+                "themes": themes,
             }
         )
     focus_cards = sort_focus_cards(focus_cards, sort_by="priority_desc")
@@ -590,6 +593,34 @@ def _card_matches(
 def _tracking_status_label(value: object) -> str:
     status = str(value or "").strip()
     return TRACKING_STATUS_ALIASES.get(status.casefold(), status)
+
+
+def _metadata_keywords(metadata: dict[str, Any]) -> list[str]:
+    raw_keywords = metadata.get("keywords", [])
+    if isinstance(raw_keywords, str):
+        values = [
+            item.strip()
+            for item in raw_keywords.replace("|", ";").split(";")
+            if item.strip()
+        ]
+    elif isinstance(raw_keywords, list):
+        values = [str(item).strip() for item in raw_keywords if str(item).strip()]
+    else:
+        values = []
+
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for value in values:
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        keywords.append(value)
+    return keywords
+
+
+def _source_summary(metadata: dict[str, Any]) -> str:
+    return str(metadata.get("feed_summary") or "").strip()
 
 
 def _is_priority_item(item: dict[str, Any]) -> bool:

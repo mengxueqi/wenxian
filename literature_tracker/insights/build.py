@@ -267,7 +267,12 @@ def _build_tracking_items(
 
 
 def _extract_themes(paper: StoredPaper) -> list[str]:
-    text = f"{paper.canonical_title} {paper.abstract}".lower()
+    keywords = paper.metadata.get("keywords", [])
+    if isinstance(keywords, list):
+        keyword_text = " ".join(str(keyword) for keyword in keywords)
+    else:
+        keyword_text = str(keywords or "")
+    text = f"{paper.canonical_title} {paper.abstract} {keyword_text}".lower()
     themes: list[str] = []
     for theme, keywords in THEME_KEYWORDS.items():
         if any(keyword in text for keyword in keywords):

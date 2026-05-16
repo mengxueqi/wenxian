@@ -4,8 +4,10 @@ import unittest
 
 from bs4 import BeautifulSoup
 
+from literature_tracker.collectors import get_collector
 from literature_tracker.collectors.base import BaseCollector, CollectorError
 from literature_tracker.collectors.cip import CIPCollector
+from literature_tracker.collectors.generic import GenericJournalCollector
 from literature_tracker.models import RawRecord, SourceConfig
 
 
@@ -19,6 +21,45 @@ class DummyCollector(BaseCollector):
 
     def fetch_soup(self, url: str) -> BeautifulSoup:
         return BeautifulSoup(self.html, "html.parser")
+
+
+class DummyGenericJournalCollector(GenericJournalCollector):
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        super().__init__()
+        self.payloads = payloads
+
+    def fetch_bytes(self, url: str) -> bytes:
+        return self.payloads[url]
+
+    def fetch_html(self, url: str) -> str:
+        return self.payloads[url].decode("utf-8")
+
+    def enrich_with_citation_meta(self, record: RawRecord) -> RawRecord:
+        return record
+
+    def _fetch_openalex_work(self, record: RawRecord) -> dict[str, object] | None:
+        return None
+
+    def _fetch_pubmed_record(self, record: RawRecord) -> dict[str, object] | None:
+        return None
+
+
+class DummyOpenAlexGenericJournalCollector(DummyGenericJournalCollector):
+    def __init__(self, payloads: dict[str, bytes], work: dict[str, object]) -> None:
+        super().__init__(payloads)
+        self.work = work
+
+    def _fetch_openalex_work(self, record: RawRecord) -> dict[str, object] | None:
+        return self.work
+
+
+class DummyPubMedGenericJournalCollector(DummyGenericJournalCollector):
+    def __init__(self, payloads: dict[str, bytes], pubmed_record: dict[str, object]) -> None:
+        super().__init__(payloads)
+        self.pubmed_record = pubmed_record
+
+    def _fetch_pubmed_record(self, record: RawRecord) -> dict[str, object] | None:
+        return self.pubmed_record
 
 
 class CollectorHelperTests(unittest.TestCase):
@@ -38,6 +79,8 @@ class CollectorHelperTests(unittest.TestCase):
           <head>
             <meta name="citation_title" content="以合成生物学创新，赋能未来农业发展" />
             <meta name="citation_doi" content="10.12211/2096-8280.2025-097" />
+            <meta name="citation_keywords" content="CRISPR; synthetic biology" />
+            <meta name="dc.keywords" content="genome editing, metabolic engineering" />
             <meta name="Description" content="摘要内容" />
           </head>
         </html>
@@ -52,6 +95,10 @@ class CollectorHelperTests(unittest.TestCase):
             ["10.12211/2096-8280.2025-097"],
         )
         self.assertEqual(BaseCollector.meta_contents(soup, "description"), ["摘要内容"])
+        self.assertEqual(
+            BaseCollector.keyword_contents(soup),
+            ["CRISPR", "synthetic biology", "genome editing", "metabolic engineering"],
+        )
 
     def test_extracts_doi_from_url(self) -> None:
         value = "https://synbioj.cip.com.cn/CN/10.12211/2096-8280.2025-097"
@@ -137,6 +184,217 @@ class CollectorHelperTests(unittest.TestCase):
             CIPCollector.abstract_contents(soup)[0],
             "高通量基因组编辑是快速分析大量基因突变功能和进行遗传育种的有效方法。本文主要介绍基于CRISPR系统的高通量基因组编辑方法。",
         )
+
+
+class GenericJournalCollectorTests(unittest.TestCase):
+    def test_collects_rss_entries_and_cleans_tracking_urls(self) -> None:
+        feed_url = "https://rss.sciencedirect.com/publication/science/10967176"
+        feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>ScienceDirect Publication: Metabolic Engineering</title>
+            <item>
+              <title><![CDATA[<em>De novo</em> biosynthesis]]></title>
+              <link>https://www.sciencedirect.com/science/article/pii/S1096717626000601?dgcid=rss_sd_all</link>
+              <description><![CDATA[
+                <p>Publication date: July 2026</p>
+                <p><b>Source:</b> Metabolic Engineering</p>
+                <p>Author(s): Alice Example, Bob Example</p>
+              ]]></description>
+            </item>
+          </channel>
+        </rss>
+        """
+        source = SourceConfig(
+            source_name="Metabolic Engineering",
+            canonical_url="https://www.sciencedirect.com/journal/metabolic-engineering",
+            platform="sciencedirect",
+            incremental_url=feed_url,
+            collector_kind="rss+html_detail",
+        )
+        collector = DummyGenericJournalCollector({feed_url: feed})
+
+        records = collector.collect(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].title, "De novo biosynthesis")
+        self.assertEqual(
+            records[0].article_url,
+            "https://www.sciencedirect.com/science/article/pii/S1096717626000601",
+        )
+        self.assertEqual(records[0].authors, "Alice Example; Bob Example")
+        self.assertEqual(records[0].published_at, "July 2026")
+        self.assertEqual(records[0].abstract, "")
+
+    def test_sciencedirect_records_can_be_enriched_from_openalex(self) -> None:
+        feed_url = "https://rss.sciencedirect.com/publication/science/10967176"
+        title = "Orthogonal quorum sensing circuits enable dynamic regulation in Escherichia coli"
+        feed = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>{title}</title>
+              <link>https://www.sciencedirect.com/science/article/pii/S1096717626000431?dgcid=rss_sd_all</link>
+            </item>
+          </channel>
+        </rss>
+        """.encode()
+        work = {
+            "id": "https://openalex.org/W1",
+            "doi": "https://doi.org/10.1016/j.ymben.2026.03.009",
+            "display_name": title,
+            "abstract_inverted_index": {
+                "Orthogonal": [0],
+                "circuits": [1],
+                "improve": [2],
+                "regulation.": [3],
+            },
+            "keywords": [
+                {"display_name": "Quorum sensing", "score": 0.86},
+                {"display_name": "Synthetic biology", "score": 0.35},
+            ],
+        }
+        source = SourceConfig(
+            source_name="Metabolic Engineering",
+            canonical_url="https://www.sciencedirect.com/journal/metabolic-engineering",
+            platform="sciencedirect",
+            incremental_url=feed_url,
+            collector_kind="rss+html_detail",
+        )
+        collector = DummyOpenAlexGenericJournalCollector({feed_url: feed}, work)
+
+        records = collector.collect(source)
+
+        self.assertEqual(records[0].doi, "10.1016/j.ymben.2026.03.009")
+        self.assertEqual(
+            records[0].metadata["keywords"],
+            ["Quorum sensing", "Synthetic biology"],
+        )
+        self.assertEqual(records[0].abstract, "Orthogonal circuits improve regulation.")
+
+    def test_sciencedirect_records_can_be_enriched_from_pubmed(self) -> None:
+        feed_url = "https://rss.sciencedirect.com/publication/science/10967176"
+        title = "Orthogonal quorum sensing circuits enable dynamic regulation in Escherichia coli"
+        feed = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>{title}</title>
+              <link>https://www.sciencedirect.com/science/article/pii/S1096717626000431?dgcid=rss_sd_all</link>
+            </item>
+          </channel>
+        </rss>
+        """.encode()
+        pubmed_record = {
+            "pmid": "41850580",
+            "doi": "10.1016/j.ymben.2026.03.009",
+            "title": f"{title}.",
+            "abstract": "Engineers have effectively employed quorum sensing to regulate gene expression.",
+            "keywords": [
+                "CRISPRi",
+                "Dynamic regulation",
+                "Quorum sensing",
+                "Synthetic biology",
+            ],
+        }
+        source = SourceConfig(
+            source_name="Metabolic Engineering",
+            canonical_url="https://www.sciencedirect.com/journal/metabolic-engineering",
+            platform="sciencedirect",
+            incremental_url=feed_url,
+            collector_kind="rss+html_detail",
+        )
+        collector = DummyPubMedGenericJournalCollector({feed_url: feed}, pubmed_record)
+
+        records = collector.collect(source)
+
+        self.assertEqual(records[0].doi, "10.1016/j.ymben.2026.03.009")
+        self.assertEqual(
+            records[0].metadata["keywords"],
+            ["CRISPRi", "Dynamic regulation", "Quorum sensing", "Synthetic biology"],
+        )
+        self.assertEqual(
+            records[0].abstract,
+            "Engineers have effectively employed quorum sensing to regulate gene expression.",
+        )
+        self.assertEqual(records[0].metadata["pubmed_id"], "41850580")
+
+    def test_collects_oup_rss_abstract_and_doi(self) -> None:
+        feed_url = "https://academic.oup.com/rss/site_5419/advanceAccess_3280.xml"
+        feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Synthetic Biology Advance Access</title>
+            <item>
+              <title>Off-target detection of CRISPR-Cas9 nuclease in vitro with CROFT-Seq</title>
+              <link>https://academic.oup.com/synbio/advance-article/doi/10.1093/synbio/ysag006/8661338?rss=1</link>
+              <pubDate>Thu, 23 Apr 2026 00:00:00 GMT</pubDate>
+              <prism:doi xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">10.1093/synbio/ysag006</prism:doi>
+              <description><![CDATA[
+                <span class="paragraphSection"><div class="boxTitle">Abstract</div>Programmable nucleases need careful off-target detection.</span>
+              ]]></description>
+            </item>
+          </channel>
+        </rss>
+        """
+        source = SourceConfig(
+            source_name="Synthetic Biology",
+            canonical_url="https://academic.oup.com/synbio",
+            platform="oup",
+            incremental_url=feed_url,
+            collector_kind="rss+rss_current_issue_fallback+html_detail",
+        )
+        collector = DummyGenericJournalCollector({feed_url: feed})
+
+        records = collector.collect(source, limit=1)
+
+        self.assertEqual(records[0].doi, "10.1093/synbio/ysag006")
+        self.assertEqual(
+            records[0].article_url,
+            "https://academic.oup.com/synbio/advance-article/doi/10.1093/synbio/ysag006/8661338",
+        )
+        self.assertEqual(
+            records[0].abstract,
+            "Programmable nucleases need careful off-target detection.",
+        )
+
+    def test_filters_html_listing_by_platform(self) -> None:
+        listing_url = "https://www.nature.com/nrmicro/articles"
+        html = b"""
+        <html>
+          <body>
+            <a href="/articles/s41579-026-01300-3">Bacterial allies against food anaphylaxis</a>
+            <a href="/articles/not-a-paper">View all articles</a>
+          </body>
+        </html>
+        """
+        source = SourceConfig(
+            source_name="Nature Reviews Microbiology",
+            canonical_url="https://www.nature.com/nrmicro/",
+            platform="nature",
+            incremental_url=listing_url,
+            collector_kind="html_articles",
+        )
+        collector = DummyGenericJournalCollector({listing_url: html})
+
+        records = collector.collect(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0].article_url,
+            "https://www.nature.com/articles/s41579-026-01300-3",
+        )
+
+    def test_registry_supports_generic_journal_platforms(self) -> None:
+        source = SourceConfig(
+            source_name="Yeast",
+            canonical_url="https://onlinelibrary.wiley.com/journal/10970061",
+            platform="wiley",
+            incremental_url="https://onlinelibrary.wiley.com/action/showFeed?jc=10970061&type=etoc&feed=rss",
+            collector_kind="rss+html_detail",
+        )
+
+        self.assertIsInstance(get_collector(source), GenericJournalCollector)
 
 
 if __name__ == "__main__":

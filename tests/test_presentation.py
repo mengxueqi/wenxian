@@ -41,6 +41,10 @@ class PresentationTests(unittest.TestCase):
                         abstract="A synthetic biology article using CRISPR tools.",
                         doi="10.1000/a1",
                         collector_kind="html",
+                        metadata={
+                            "keywords": ["CRISPR", "Synthetic biology"],
+                            "feed_summary": "Source-provided summary.",
+                        },
                     ),
                     RawRecord(
                         source_name="Source B",
@@ -79,6 +83,14 @@ class PresentationTests(unittest.TestCase):
                 "This retracted synthetic biology article uses CRISPR tools.",
             )
             self.assertEqual(filtered["focus_cards"][0]["tracking_status"], "review")
+
+            source_a_card = next(
+                card
+                for card in snapshot["focus_cards"]
+                if card["title"] == "CRISPR synthetic biology advance"
+            )
+            self.assertEqual(source_a_card["keywords"], ["CRISPR", "Synthetic biology"])
+            self.assertEqual(source_a_card["source_summary"], "Source-provided summary.")
 
     def test_build_filter_options_collects_current_snapshot_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

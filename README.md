@@ -24,6 +24,16 @@
 | 合成生物学 | `https://synbioj.cip.com.cn/CN/2096-8280/home.shtml` | `magtech_cip` | RSS `rss_zxly_2096-8280.xml` | RSS 优先，失败时回退最新文章列表；详情页补 DOI、作者、摘要、PDF |
 | Advanced Biotechnology | `https://link.springer.com/journal/44307` | `springer` | `/articles` | Springer 列表页 + 详情页 citation meta |
 | Journal of Biological Engineering | `https://link.springer.com/journal/13036` | `springer` | `/online-first` | online-first 优先，必要时 fallback 到 `/articles` |
+| Metabolic Engineering | `https://www.sciencedirect.com/journal/metabolic-engineering` | `sciencedirect` | ScienceDirect RSS `10967176` | RSS 可读；详情页可能阻断 requests；DOI/关键词可用 OpenAlex 补全，摘要仍取决于可用元数据 |
+| Synthetic Biology | `https://academic.oup.com/synbio` | `oup` | OUP Advance Access RSS | 先抓 advance access，再补当前期 RSS |
+| Scientific American | `https://www.scientificamerican.com/` | `scientific_american` | 官方 RSS | 科学新闻源，通常没有 DOI |
+| Journal of Bacteriology | `https://journals.asm.org/journal/jb` | `asm` | `/toc/jb/current` | 当前标记为 `blocked`；ASM/Literatum 页面需要 browser-backed fetcher |
+| Trends in Microbiology | `https://www.cell.com/trends/microbiology/home` | `cell` | `inpress.rss` | 先抓 in press RSS，再补 current RSS |
+| Nature Reviews Microbiology | `https://www.nature.com/nrmicro/` | `nature` | `nrmicro.rss` | RSS 优先，失败时 fallback 到 `/articles` |
+| Annals of Microbiology | `https://link.springer.com/journal/13213` | `springer` | `/articles` | Springer 列表页；用户链接里的 tracking 参数已清理 |
+| Microbiology | `https://www.microbiologyresearch.org/content/journal/micro` | `microbiology_research` | 官方 latest issue RSS | 当前标记为 `blocked`；MicrobiologyResearch 会触发 Cloudflare 阻断 |
+| Journal of Eukaryotic Microbiology | `https://onlinelibrary.wiley.com/journal/15507408` | `wiley` | Wiley eTOC RSS | 用户重复给出的 Wiley 15507408 只保留一条 |
+| Yeast | `https://onlinelibrary.wiley.com/journal/10970061` | `wiley` | Wiley eTOC RSS | RSS 可读，详情页用于可选补全 |
 
 ## 新电脑部署
 
@@ -135,7 +145,7 @@ score < 0.65 -> low -> watchlist
 
 ```text
 literature_tracker/
-  collectors/      # 网站采集器：CIP/Magtech、Springer
+  collectors/      # 网站采集器：CIP/Magtech、Springer、通用 RSS/HTML 期刊页
   detectors/       # 变化检测
   insights/        # 摘要、理由、评分和 tracking item 构建
   processors/      # raw_records -> papers 规范化
