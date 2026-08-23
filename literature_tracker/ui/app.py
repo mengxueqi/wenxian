@@ -5,6 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from ..config import load_sources
 from ..paths import DB_PATH
 from ..presentation import (
     SORT_OPTIONS,
@@ -21,7 +22,7 @@ from ..presentation import (
     rows_to_csv_bytes,
 )
 from ..storage import SQLiteRepository
-from ..tasks import crawl_sources, run_change_detection, run_insight_build, run_process_stage
+from ..tasks import run_full_pipeline
 
 
 def render_app(db_path: Path = DB_PATH) -> None:
@@ -34,6 +35,7 @@ def render_app(db_path: Path = DB_PATH) -> None:
 
     repository = SQLiteRepository(db_path)
     repository.initialize()
+    repository.sync_sources(load_sources())
 
     if st.sidebar.button("一键抓取", type="primary", use_container_width=True):
         with st.spinner("一键抓取中..."):
@@ -41,13 +43,17 @@ def render_app(db_path: Path = DB_PATH) -> None:
 
     if "one_click_crawl_result" in st.session_state:
         result = st.session_state["one_click_crawl_result"]
-        st.sidebar.success(
-            "抓取完成："
+        message = (
+            "更新完成："
             f"{result['raw_records']} 条原始记录，"
             f"{result['papers']} 篇论文，"
             f"{result['changes']} 条变化，"
             f"{result['tracking_items']} 个追踪项。"
         )
+        if result["status"] == "success":
+            st.sidebar.success(message)
+        else:
+            st.sidebar.warning(message + " 部分来源或阶段需要检查。")
 
     all_snapshot = build_snapshot(repository)
     tracking_rows = build_tracking_rows(all_snapshot)
@@ -231,6 +237,33 @@ def render_app(db_path: Path = DB_PATH) -> None:
             else:
                 st.info("No visible tracking items.")
 
+        health_attention = [
+            row
+            for row in [
+                *all_snapshot["source_health"],
+                *all_snapshot["pipeline_health"],
+            ]
+            if row["health_state"] != "healthy"
+        ]
+        if health_attention:
+            st.warning(f"{len(health_attention)} source or pipeline health item(s) need attention.")
+
+        health_columns = st.columns(2)
+        with health_columns[0]:
+            st.markdown("#### Source Health")
+            st.dataframe(
+                all_snapshot["source_health"],
+                use_container_width=True,
+                hide_index=True,
+            )
+        with health_columns[1]:
+            st.markdown("#### Pipeline Health")
+            st.dataframe(
+                all_snapshot["pipeline_health"],
+                use_container_width=True,
+                hide_index=True,
+            )
+
     with tabs[3]:
         new_paper_batches = build_new_paper_batch_rows(all_snapshot)
         if new_paper_batches:
@@ -291,17 +324,20 @@ def _build_active_filters(
     return parts
 
 
-def _run_one_click_crawl(db_path: Path) -> dict[str, int]:
-    crawl_summary = crawl_sources(db_path=db_path)
-    process_summary = run_process_stage(db_path=db_path)
-    change_summary = run_change_detection(db_path=db_path)
-    insight_summary = run_insight_build(db_path=db_path)
+def _run_one_click_crawl(db_path: Path) -> dict[str, object]:
+    summary = run_full_pipeline(db_path=db_path)
+    stages = summary["stages"]
+    crawl_summary = stages.get("crawl", {})
+    process_summary = stages.get("process", {})
+    change_summary = stages.get("detect_changes", {})
+    insight_summary = stages.get("build_insights", {})
 
     return {
-        "raw_records": int(crawl_summary["stored_raw_records"]),
-        "papers": int(process_summary["upserted_papers"]),
-        "changes": int(change_summary["detected_changes"]),
-        "tracking_items": int(insight_summary["upserted_tracking_items"]),
+        "status": summary["status"],
+        "raw_records": int(crawl_summary.get("stored_raw_records", 0)),
+        "papers": int(process_summary.get("upserted_papers", 0)),
+        "changes": int(change_summary.get("detected_changes", 0)),
+        "tracking_items": int(insight_summary.get("upserted_tracking_items", 0)),
     }
 
 

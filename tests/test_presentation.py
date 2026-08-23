@@ -13,6 +13,7 @@ from literature_tracker.presentation import (
     build_new_paper_batch_rows,
     build_new_paper_rows,
     build_recent_focus_cards,
+    build_run_health,
     build_snapshot,
     rows_to_csv_bytes,
 )
@@ -25,6 +26,26 @@ from literature_tracker.tasks import (
 
 
 class PresentationTests(unittest.TestCase):
+    def test_build_run_health_marks_old_success_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "test.db"
+            repository = SQLiteRepository(db_path)
+            repository.initialize()
+            process_run = repository.start_process_run()
+            repository.finish_process_run(
+                process_run,
+                status="success",
+                item_count=1,
+            )
+
+            _, pipeline_health = build_run_health(
+                repository,
+                now=datetime(2100, 1, 1),
+            )
+
+            self.assertEqual(pipeline_health[0]["health_state"], "stale")
+            self.assertEqual(pipeline_health[1]["health_state"], "never")
+
     def test_build_filtered_snapshot_applies_filters_and_sorting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "test.db"

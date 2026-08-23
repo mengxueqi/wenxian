@@ -39,6 +39,7 @@ class BaseCollector(ABC):
         if response.status_code in {403, 429}:
             self.raise_for_known_blockers(response.text, url)
         response.raise_for_status()
+        self.raise_for_known_blockers(response.text, url)
         return response.content
 
     def fetch_html(self, url: str) -> str:

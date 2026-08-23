@@ -32,6 +32,10 @@ def build_snapshot(
     changes = repository.fetch_paper_changes(source_name=source_name)
     insights = repository.fetch_paper_insights(source_name=source_name)
     tracking_items = repository.fetch_tracking_items(source_name=source_name)
+    source_health, pipeline_health = build_run_health(
+        repository,
+        source_name=source_name,
+    )
 
     papers_by_id = {paper.id: paper for paper in papers}
     changes_by_paper = _group_changes_by_paper(changes)
@@ -102,7 +106,40 @@ def build_snapshot(
         "changes": changes,
         "insights": insights,
         "tracking_items": tracking_items,
+        "source_health": source_health,
+        "pipeline_health": pipeline_health,
     }
+
+
+def build_run_health(
+    repository: SQLiteRepository,
+    *,
+    source_name: str | None = None,
+    now: datetime | None = None,
+    stale_after: timedelta = timedelta(days=2),
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    current_time = now or datetime.now()
+    source_rows = [
+        _with_health_state(
+            row,
+            current_time=current_time,
+            stale_after=stale_after,
+            configured_status=str(row.get("source_status") or ""),
+            run_status=str(row.get("last_run_status") or "never"),
+        )
+        for row in repository.fetch_source_health(source_name=source_name)
+    ]
+    pipeline_rows = [
+        _with_health_state(
+            row,
+            current_time=current_time,
+            stale_after=stale_after,
+            configured_status="active",
+            run_status=str(row.get("status") or "never"),
+        )
+        for row in repository.fetch_pipeline_health()
+    ]
+    return source_rows, pipeline_rows
 
 
 def build_markdown_report(
@@ -641,6 +678,31 @@ def _is_recent_card(
         return False
     age = now - created_at
     return timedelta(0) <= age <= window
+
+
+def _with_health_state(
+    row: dict[str, object],
+    *,
+    current_time: datetime,
+    stale_after: timedelta,
+    configured_status: str,
+    run_status: str,
+) -> dict[str, object]:
+    normalized_source_status = configured_status.strip().casefold()
+    normalized_run_status = run_status.strip().casefold()
+    if normalized_source_status and normalized_source_status != "active":
+        health_state = normalized_source_status
+    elif normalized_run_status in {"failed", "partial", "running", "never"}:
+        health_state = normalized_run_status
+    else:
+        completed_at = _parse_datetime(row.get("completed_at"))
+        if completed_at is None:
+            health_state = "never"
+        elif current_time - completed_at > stale_after:
+            health_state = "stale"
+        else:
+            health_state = "healthy"
+    return {"health_state": health_state, **row}
 
 
 def _parse_datetime(value: object) -> datetime | None:

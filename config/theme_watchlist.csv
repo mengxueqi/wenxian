@@ -1,0 +1,13 @@
+theme_name,keywords,score_weight,enabled
+synthetic_biology,synthetic biology|synbio|synthetic biomanufacturing|microbial cell factory|cell factory,0.15,true
+crispr,crispr|crispr-cas|crispr/cas|cas9|cas12|gene editing|genome editing|base editing|prime editing,0.15,true
+p450_enzyme,p450 enzyme|p450 enzymes|cytochrome p450|cytochrome p450 enzyme|cytochrome p450 monooxygenase|cyp450|p450 monooxygenase|p450 biocatalyst,0.15,true
+kred,kred|kreds|ketoreductase|ketoreductases|keto reductase|keto reductases|keto-reductase|keto-reductases,0.15,true
+gamma_lactone,gamma-lactone|gamma lactone|gamma lactones|gamma-butyrolactone|gamma butyrolactone|γ-lactone|γ lactone|γ-lactones|γ-butyrolactone|γ butyrolactone,0.15,true
+flavors_and_fragrances,flavor|flavors|flavour|flavours|fragrance|fragrances|flavor compound|flavour compound|aroma compound|aroma compounds|aroma chemical|aroma chemicals|odorant|odorants|flavors and fragrances|flavours and fragrances,0.15,true
+benzyl_alcohol,benzyl alcohol|phenylmethanol|benzenemethanol,0.15,true
+phenethyl_alcohol,phenethyl alcohol|phenylethyl alcohol|phenylethanol|2-phenylethanol|2 phenylethanol|beta-phenylethyl alcohol|β-phenylethyl alcohol,0.15,true
+lactone,lactone|lactones|cyclic ester|cyclic esters,0.15,true
+carbonyl_reductase,carbonyl reductase|carbonyl reductases|carbonyl-reductase|carbonyl-reductases|nadph-dependent carbonyl reductase|carbonyl reducing enzyme,0.15,true
+p450bs_beta,p450bs beta|p450bsbeta|p450bs-beta|p450 bs beta|p450 bs-beta|p450bsβ|p450 bsβ|cyp152a1,0.15,true
+delta_lactone,delta-lactone|delta lactone|delta lactones|delta-decalactone|delta decalactone|delta-dodecalactone|delta dodecalactone|δ-lactone|δ lactone|δ-lactones|δ-decalactone|δ decalactone|δ-dodecalactone|δ dodecalactone,0.15,true

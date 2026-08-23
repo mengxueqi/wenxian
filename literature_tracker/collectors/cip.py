@@ -27,8 +27,13 @@ class CIPCollector(BaseCollector):
         enriched: list[RawRecord] = []
         for record in records[: limit or len(records)]:
             try:
-                enriched.append(self.enrich_with_citation_meta(record))
-            except Exception:
+                enriched_record = self.enrich_with_citation_meta(record)
+                enriched_record.metadata["enrichment_status"] = "success"
+                enriched_record.metadata.pop("enrichment_error", None)
+                enriched.append(enriched_record)
+            except Exception as exc:
+                record.metadata["enrichment_status"] = "failed"
+                record.metadata["enrichment_error"] = str(exc)
                 enriched.append(record)
         return self.dedupe_by_article_url(enriched)
 

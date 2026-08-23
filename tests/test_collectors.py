@@ -8,6 +8,7 @@ from literature_tracker.collectors import get_collector
 from literature_tracker.collectors.base import BaseCollector, CollectorError
 from literature_tracker.collectors.cip import CIPCollector
 from literature_tracker.collectors.generic import GenericJournalCollector
+from literature_tracker.collectors.springer import SpringerCollector
 from literature_tracker.models import RawRecord, SourceConfig
 
 
@@ -62,6 +63,39 @@ class DummyPubMedGenericJournalCollector(DummyGenericJournalCollector):
         return self.pubmed_record
 
 
+class DummyFailingDetailCollector(DummyGenericJournalCollector):
+    def enrich_with_citation_meta(self, record: RawRecord) -> RawRecord:
+        raise CollectorError("detail page blocked")
+
+
+class DummyCrossrefSpringerCollector(SpringerCollector):
+    def __init__(self, items: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.items = items
+
+    def _fetch_crossref_items(
+        self,
+        url: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        return self.items[: limit or None]
+
+
+class _FakeResponse:
+    status_code = 200
+    text = "<title>Client Challenge</title>JavaScript is disabled in your browser"
+    content = text.encode("utf-8")
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeSession:
+    def get(self, url: str, timeout: int) -> _FakeResponse:
+        return _FakeResponse()
+
+
 class CollectorHelperTests(unittest.TestCase):
     def test_detects_springer_client_challenge(self) -> None:
         html = """
@@ -72,6 +106,13 @@ class CollectorHelperTests(unittest.TestCase):
         """
         with self.assertRaises(CollectorError):
             BaseCollector.raise_for_known_blockers(html, "https://link.springer.com/journal/13036")
+
+    def test_fetch_bytes_rejects_http_200_client_challenge(self) -> None:
+        collector = DummyCollector("")
+        collector.session = _FakeSession()
+
+        with self.assertRaises(CollectorError):
+            collector.fetch_bytes("https://www.nature.com/example.rss")
 
     def test_extracts_citation_meta_values(self) -> None:
         html = """
@@ -187,6 +228,67 @@ class CollectorHelperTests(unittest.TestCase):
 
 
 class GenericJournalCollectorTests(unittest.TestCase):
+    def test_rss_subdomain_is_recognized_as_feed(self) -> None:
+        self.assertTrue(
+            GenericJournalCollector._looks_like_feed_url(
+                "https://rss.sciencedirect.com/publication/science/10967176"
+            )
+        )
+
+    def test_feed_only_source_skips_detail_enrichment(self) -> None:
+        feed_url = "https://example.com/feed.xml"
+        feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Feed-only paper</title>
+              <link>https://example.com/article/1</link>
+              <description>Abstract from the feed.</description>
+            </item>
+          </channel>
+        </rss>
+        """
+        source = SourceConfig(
+            source_name="Science",
+            canonical_url="https://example.com",
+            platform="science",
+            incremental_url=feed_url,
+            collector_kind="rss",
+        )
+        collector = DummyFailingDetailCollector({feed_url: feed})
+
+        records = collector.collect(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].abstract, "from the feed.")
+        self.assertNotIn("enrichment_status", records[0].metadata)
+
+    def test_detail_enrichment_failure_is_preserved_as_record_warning(self) -> None:
+        feed_url = "https://example.com/feed.xml"
+        feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Example paper</title>
+              <link>https://example.com/article/1</link>
+            </item>
+          </channel>
+        </rss>
+        """
+        source = SourceConfig(
+            source_name="Test Journal",
+            canonical_url="https://example.com",
+            platform="nature",
+            incremental_url=feed_url,
+            collector_kind="rss+html_detail",
+        )
+        collector = DummyFailingDetailCollector({feed_url: feed})
+
+        records = collector.collect(source)
+
+        self.assertEqual(records[0].metadata["enrichment_status"], "failed")
+        self.assertIn("detail page blocked", records[0].metadata["enrichment_error"])
+
     def test_collects_rss_entries_and_cleans_tracking_urls(self) -> None:
         feed_url = "https://rss.sciencedirect.com/publication/science/10967176"
         feed = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -385,6 +487,22 @@ class GenericJournalCollectorTests(unittest.TestCase):
             "https://www.nature.com/articles/s41579-026-01300-3",
         )
 
+    def test_cell_platform_accepts_fulltext_links_across_journals(self) -> None:
+        source = SourceConfig(
+            source_name="Molecular Cell",
+            canonical_url="https://www.cell.com/molecular-cell/home",
+            platform="cell",
+            incremental_url="https://www.cell.com/molecular-cell/inpress.rss",
+            collector_kind="rss+rss_current_fallback+html_detail",
+        )
+
+        self.assertTrue(
+            GenericJournalCollector._is_article_href(
+                source,
+                "/molecular-cell/fulltext/S1097-2765(26)00001-2",
+            )
+        )
+
     def test_registry_supports_generic_journal_platforms(self) -> None:
         source = SourceConfig(
             source_name="Yeast",
@@ -395,6 +513,58 @@ class GenericJournalCollectorTests(unittest.TestCase):
         )
 
         self.assertIsInstance(get_collector(source), GenericJournalCollector)
+
+        science_source = SourceConfig(
+            source_name="Science",
+            canonical_url="https://www.science.org/journal/science",
+            platform="science",
+            incremental_url=(
+                "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science"
+            ),
+            collector_kind="rss+html_detail",
+        )
+        self.assertIsInstance(get_collector(science_source), GenericJournalCollector)
+
+
+class SpringerCollectorTests(unittest.TestCase):
+    def test_collects_crossref_records_without_opening_springer_pages(self) -> None:
+        source = SourceConfig(
+            source_name="Journal of Biological Engineering",
+            canonical_url="https://link.springer.com/journal/13036",
+            platform="springer",
+            incremental_url="https://api.crossref.org/journals/1754-1611/works",
+            collector_kind="crossref_api",
+        )
+        collector = DummyCrossrefSpringerCollector(
+            [
+                {
+                    "DOI": "10.1186/s13036-026-00744-8",
+                    "URL": "https://doi.org/10.1186/s13036-026-00744-8",
+                    "title": ["A precision bioengineering study"],
+                    "author": [
+                        {"given": "Alice", "family": "Example"},
+                        {"given": "Bob", "family": "Researcher"},
+                    ],
+                    "published-online": {"date-parts": [[2026, 8, 5]]},
+                    "abstract": "<jats:p>Abstract A structured abstract.</jats:p>",
+                    "subject": ["Biomedical Engineering", "Biotechnology"],
+                    "type": "journal-article",
+                }
+            ]
+        )
+
+        records = collector.collect(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].doi, "10.1186/s13036-026-00744-8")
+        self.assertEqual(records[0].authors, "Alice Example; Bob Researcher")
+        self.assertEqual(records[0].published_at, "2026-08-05")
+        self.assertEqual(records[0].abstract, "A structured abstract.")
+        self.assertEqual(records[0].metadata["external_metadata_source"], "crossref")
+        self.assertEqual(
+            records[0].metadata["keywords"],
+            ["Biomedical Engineering", "Biotechnology"],
+        )
 
 
 if __name__ == "__main__":

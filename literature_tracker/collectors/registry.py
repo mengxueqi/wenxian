@@ -18,6 +18,7 @@ def get_collector(source: SourceConfig) -> BaseCollector:
         "oup": generic_collector,
         "scientific_american": generic_collector,
         "sciencedirect": generic_collector,
+        "science": generic_collector,
         "springer": SpringerCollector(),
         "wiley": generic_collector,
     }

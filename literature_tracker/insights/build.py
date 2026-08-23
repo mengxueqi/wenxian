@@ -1,145 +1,17 @@
 from __future__ import annotations
 
-import csv
 import re
 from collections import defaultdict
 from datetime import datetime
-from functools import lru_cache
-from pathlib import Path
 
+from ..config import load_author_watchlist, load_theme_watchlist
 from ..models import (
     PaperInsightRecord,
     StoredPaper,
     StoredPaperChange,
     TrackingItemRecord,
 )
-from ..paths import AUTHOR_WATCHLIST_CSV
 
-
-THEME_KEYWORDS = {
-    "synthetic_biology": [
-        "synthetic biology",
-        "synbio",
-        "synthetic biomanufacturing",
-        "microbial cell factory",
-        "cell factory",
-    ],
-    "crispr": [
-        "crispr",
-        "crispr-cas",
-        "crispr/cas",
-        "cas9",
-        "cas12",
-        "gene editing",
-        "genome editing",
-        "base editing",
-        "prime editing",
-    ],
-    "p450_enzyme": [
-        "p450 enzyme",
-        "p450 enzymes",
-        "cytochrome p450",
-        "cytochrome p450 enzyme",
-        "cytochrome p450 monooxygenase",
-        "cyp450",
-        "p450 monooxygenase",
-        "p450 biocatalyst",
-    ],
-    "kred": [
-        "kred",
-        "kreds",
-        "ketoreductase",
-        "ketoreductases",
-        "keto reductase",
-        "keto reductases",
-        "keto-reductase",
-        "keto-reductases",
-    ],
-    "gamma_lactone": [
-        "gamma-lactone",
-        "gamma lactone",
-        "gamma lactones",
-        "gamma-butyrolactone",
-        "gamma butyrolactone",
-        "\u03b3-lactone",
-        "\u03b3 lactone",
-        "\u03b3-lactones",
-        "\u03b3-butyrolactone",
-        "\u03b3 butyrolactone",
-    ],
-    "flavors_and_fragrances": [
-        "flavor",
-        "flavors",
-        "flavour",
-        "flavours",
-        "fragrance",
-        "fragrances",
-        "flavor compound",
-        "flavour compound",
-        "aroma compound",
-        "aroma compounds",
-        "aroma chemical",
-        "aroma chemicals",
-        "odorant",
-        "odorants",
-        "flavors and fragrances",
-        "flavours and fragrances",
-    ],
-    "benzyl_alcohol": [
-        "benzyl alcohol",
-        "phenylmethanol",
-        "benzenemethanol",
-    ],
-    "phenethyl_alcohol": [
-        "phenethyl alcohol",
-        "phenylethyl alcohol",
-        "phenylethanol",
-        "2-phenylethanol",
-        "2 phenylethanol",
-        "beta-phenylethyl alcohol",
-        "\u03b2-phenylethyl alcohol",
-    ],
-    "lactone": [
-        "lactone",
-        "lactones",
-        "cyclic ester",
-        "cyclic esters",
-    ],
-    "carbonyl_reductase": [
-        "carbonyl reductase",
-        "carbonyl reductases",
-        "carbonyl-reductase",
-        "carbonyl-reductases",
-        "nadph-dependent carbonyl reductase",
-        "carbonyl reducing enzyme",
-    ],
-    "p450bs_beta": [
-        "p450bs beta",
-        "p450bsbeta",
-        "p450bs-beta",
-        "p450 bs beta",
-        "p450 bs-beta",
-        "p450bs\u03b2",
-        "p450 bs\u03b2",
-        "cyp152a1",
-    ],
-    "delta_lactone": [
-        "delta-lactone",
-        "delta lactone",
-        "delta lactones",
-        "delta-decalactone",
-        "delta decalactone",
-        "delta-dodecalactone",
-        "delta dodecalactone",
-        "\u03b4-lactone",
-        "\u03b4 lactone",
-        "\u03b4-lactones",
-        "\u03b4-decalactone",
-        "\u03b4 decalactone",
-        "\u03b4-dodecalactone",
-        "\u03b4 dodecalactone",
-    ],
-}
 
 CHANGE_BASE_SCORES = {
     "new_paper": 0.05,
@@ -150,10 +22,7 @@ CHANGE_BASE_SCORES = {
 
 DEFAULT_CHANGE_BASE_SCORE = 0.12
 RECENT_ACTIVITY_SCORE = 0.2
-THEME_SCORE_PER_HIT = 0.15
 THEME_SCORE_CAP = 0.4
-AUTHOR_HIT_BASE_SCORE = 0.4
-AUTHOR_HIT_EXTRA_SCORE = 0.0
 AUTHOR_HIT_SCORE_CAP = 0.4
 
 CHANGE_SUMMARY_PREFIX = {
@@ -176,22 +45,45 @@ def build_insight_outputs(
     changes: list[StoredPaperChange],
 ) -> tuple[list[PaperInsightRecord], list[TrackingItemRecord]]:
     papers_by_id = {paper.id: paper for paper in papers}
+    theme_rules = load_theme_watchlist()
+    author_rules = load_author_watchlist()
     insights: list[PaperInsightRecord] = []
 
     for change in changes:
         paper = papers_by_id.get(change.paper_id)
         if paper is None:
             continue
-        insights.append(_build_insight(paper, change))
+        insights.append(
+            _build_insight(
+                paper,
+                change,
+                theme_rules=theme_rules,
+                author_rules=author_rules,
+            )
+        )
 
     tracking_items = _build_tracking_items(papers_by_id, insights)
     return insights, tracking_items
 
 
-def _build_insight(paper: StoredPaper, change: StoredPaperChange) -> PaperInsightRecord:
-    themes = _extract_themes(paper)
-    author_hits = _extract_author_hits(paper)
-    score, score_factors = _score_change(paper, change, themes, author_hits)
+def _build_insight(
+    paper: StoredPaper,
+    change: StoredPaperChange,
+    *,
+    theme_rules: list[dict[str, object]],
+    author_rules: list[dict[str, object]],
+) -> PaperInsightRecord:
+    themes = _extract_themes(paper, theme_rules)
+    author_hits = _extract_author_hits(paper, author_rules)
+    author_field_hints = _author_field_hints(author_hits, author_rules)
+    score, score_factors = _score_change(
+        paper,
+        change,
+        themes,
+        author_hits,
+        theme_rules=theme_rules,
+        author_rules=author_rules,
+    )
     score_label = _score_label(score)
     summary_prefix = CHANGE_SUMMARY_PREFIX.get(change.change_type, "文献变化")
     reason = CHANGE_REASONS.get(change.change_type, "这条变化值得进一步核查。")
@@ -199,6 +91,8 @@ def _build_insight(paper: StoredPaper, change: StoredPaperChange) -> PaperInsigh
         reason = f"{reason} 当前主题信号包括：{', '.join(themes)}。"
     if author_hits:
         reason = f"{reason} 命中重点作者：{', '.join(author_hits)}。"
+    if author_field_hints:
+        reason = f"{reason} 作者关注领域：{', '.join(author_field_hints)}。"
 
     return PaperInsightRecord(
         change_id=change.id,
@@ -218,6 +112,7 @@ def _build_insight(paper: StoredPaper, change: StoredPaperChange) -> PaperInsigh
             "published_at": paper.published_at,
             "themes": themes,
             "author_hits": author_hits,
+            "author_field_hints": author_field_hints,
             "score_factors": score_factors,
             "source_change_summary": change.summary,
             "observed_content_hash": change.metadata.get("observed_content_hash"),
@@ -266,7 +161,10 @@ def _build_tracking_items(
     return items
 
 
-def _extract_themes(paper: StoredPaper) -> list[str]:
+def _extract_themes(
+    paper: StoredPaper,
+    theme_rules: list[dict[str, object]],
+) -> list[str]:
     keywords = paper.metadata.get("keywords", [])
     if isinstance(keywords, list):
         keyword_text = " ".join(str(keyword) for keyword in keywords)
@@ -274,19 +172,25 @@ def _extract_themes(paper: StoredPaper) -> list[str]:
         keyword_text = str(keywords or "")
     text = f"{paper.canonical_title} {paper.abstract} {keyword_text}".lower()
     themes: list[str] = []
-    for theme, keywords in THEME_KEYWORDS.items():
-        if any(keyword in text for keyword in keywords):
-            themes.append(theme)
+    for entry in theme_rules:
+        keywords = entry["keywords"]
+        if isinstance(keywords, list) and any(
+            str(keyword).casefold() in text for keyword in keywords
+        ):
+            themes.append(str(entry["theme_name"]))
     return themes
 
 
-def _extract_author_hits(paper: StoredPaper) -> list[str]:
+def _extract_author_hits(
+    paper: StoredPaper,
+    author_rules: list[dict[str, object]],
+) -> list[str]:
     paper_authors = _split_author_names(paper.normalized_authors)
     if not paper_authors:
         return []
 
     hits: list[str] = []
-    for entry in load_author_watchlist():
+    for entry in author_rules:
         names = [entry["author_name"], *entry["aliases"]]
         if any(
             _author_name_matches(paper_author, watched_name)
@@ -302,16 +206,30 @@ def _score_change(
     change: StoredPaperChange,
     themes: list[str],
     author_hits: list[str],
+    *,
+    theme_rules: list[dict[str, object]],
+    author_rules: list[dict[str, object]],
 ) -> tuple[float, dict[str, float]]:
     score = CHANGE_BASE_SCORES.get(change.change_type, DEFAULT_CHANGE_BASE_SCORE)
     factors = {"change_type": score}
-    theme_score = min(THEME_SCORE_CAP, THEME_SCORE_PER_HIT * len(themes))
+    theme_weights = {
+        str(entry["theme_name"]): float(entry["score_weight"])
+        for entry in theme_rules
+    }
+    theme_score = min(
+        THEME_SCORE_CAP,
+        sum(theme_weights.get(theme, 0.0) for theme in themes),
+    )
     score += theme_score
     factors["theme_hits"] = theme_score
     if author_hits:
+        author_weights = {
+            str(entry["author_name"]): float(entry["score_weight"])
+            for entry in author_rules
+        }
         author_score = min(
             AUTHOR_HIT_SCORE_CAP,
-            AUTHOR_HIT_BASE_SCORE + AUTHOR_HIT_EXTRA_SCORE * (len(author_hits) - 1),
+            sum(author_weights.get(author, 0.0) for author in author_hits),
         )
         score += author_score
         factors["author_hits"] = author_score
@@ -354,30 +272,19 @@ def _is_recent(value: object) -> bool:
     return (datetime.now() - observed).days <= 30
 
 
-@lru_cache(maxsize=1)
-def load_author_watchlist(csv_path: Path = AUTHOR_WATCHLIST_CSV) -> list[dict[str, object]]:
-    if not csv_path.exists():
-        return []
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        entries: list[dict[str, object]] = []
-        for row in reader:
-            author_name = (row.get("author_name") or "").strip()
-            if not author_name:
-                continue
-            aliases = [
-                alias.strip()
-                for alias in (row.get("aliases") or "").split("|")
-                if alias.strip()
-            ]
-            entries.append(
-                {
-                    "author_name": author_name,
-                    "aliases": aliases,
-                    "field_hint": (row.get("field_hint") or "").strip(),
-                }
-            )
-    return entries
+def _author_field_hints(
+    author_hits: list[str],
+    author_rules: list[dict[str, object]],
+) -> list[str]:
+    hit_names = {name.casefold() for name in author_hits}
+    return _dedupe_preserving_order(
+        [
+            str(entry["field_hint"])
+            for entry in author_rules
+            if str(entry["author_name"]).casefold() in hit_names
+            and str(entry["field_hint"]).strip()
+        ]
+    )
 
 
 def _split_author_names(authors: str) -> list[str]:

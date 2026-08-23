@@ -51,12 +51,16 @@ streamlit run ui_app.py
 完整更新一次文献库：
 
 ```powershell
-python -m literature_tracker.cli crawl
-python -m literature_tracker.cli process
-python -m literature_tracker.cli detect-changes
-python -m literature_tracker.cli build-insights
-python -m literature_tracker.cli build-report
+python -m literature_tracker.cli run-all
 ```
+
+安装每日计划任务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_literature_tracker_task.ps1
+```
+
+计划任务通过 `run_literature_tracker_update_hidden.vbs` 无窗口调用 `run_literature_tracker_update.ps1`，日志写入 `data/scheduled_update.log`。流水线状态为 `partial` 或 `failed` 时退出码非零。
 
 如果只想更新某个来源：
 
@@ -72,7 +76,7 @@ python -m literature_tracker.cli build-report --source "合成生物学"
 
 - `Focus`：最近 30 天内入库、评分最高的 10 篇文献。展示卡片格式与 `Library` 一致。
 - `Library`：完整 tracking queue，支持搜索、来源、状态、变化类型、关键词、最低优先级筛选。
-- `Dashboard`：来源统计、变化类型统计、tracking status 统计。
+- `Dashboard`：来源统计、变化类型、tracking status、各来源抓取状态和下游流水线状态；超过两天未成功运行显示为 `stale`。
 - `Change Analysis`：按新文献批次查看变化。
 
 ## 当前评分规则
@@ -97,8 +101,8 @@ change_base_score:
 - retraction_notice: 0.20
 - default: 0.12
 
-theme_score = min(0.40, 0.15 * 命中主题数)
-author_score = 0.40，只要命中重点作者列表
+theme_score = min(0.40, `config/theme_watchlist.csv` 中命中项权重之和)
+author_score = min(0.40, `config/author_watchlist.csv` 中命中项权重之和)
 recent_activity_score = 0.20，最近 30 天内入库/更新
 ```
 
@@ -127,20 +131,20 @@ score < 0.65 -> watchlist
 文件：`literature_tracker/collectors/springer.py`
 
 - 平台：`springer`
-- 解析列表页中 `a[href*="/article/"]`。
-- 从父级容器 `<time>` 获取发表时间。
-- 进入详情页读取 citation meta 和常见摘要区域。
-- 有些 `Publisher Correction` 页面本身没有标准摘要，不应直接删除。
+- Advanced Biotechnology、Journal of Biological Engineering 和 Annals of Microbiology 通过 Crossref ISSN API 抓取，避免 Springer 列表页的 Client Challenge。
+- 保留 DOI、标题、作者、发表日期、Crossref 主题和可用摘要；个别记录可能没有摘要。
 
 ### 通用期刊来源
 
 文件：`literature_tracker/collectors/generic.py`
 
-- 平台：`sciencedirect`、`oup`、`scientific_american`、`asm`、`cell`、`nature`、`microbiology_research`、`wiley`。
-- 优先解析 RSS/eTOC feed；HTML 页面按平台过滤文章链接，再进入详情页补 citation meta。
-- ScienceDirect RSS 不提供真实摘要；采集器会用 OpenAlex 尝试补 DOI、关键词和可用摘要。若仍无摘要，UI 显示来源元信息兜底，不把作者/日期误写成 abstract。
+- 平台：`sciencedirect`、`oup`、`scientific_american`、`asm`、`science`、`cell`、`nature`、`microbiology_research`、`wiley`。
+- 优先解析 RSS/eTOC feed；只有 `collector_kind` 含 `html_detail` 时才进入详情页补 citation meta。Science 和 Cell Press 直接使用 feed 元数据，避免详情页拦截被误报为部分失败。
+- ScienceDirect RSS 不提供真实摘要；Metabolic Engineering 固定使用官方 RSS，采集器会用 OpenAlex/PubMed 尝试补 DOI、关键词和可用摘要，不再请求受限的期刊首页或详情页。
 - UI 中 `Keywords` 是出版社/外部元数据关键词；评分命中的主题另以 `Themes` 显示。
 - 已验证可读 RSS：ScienceDirect Metabolic Engineering、OUP Synthetic Biology、Cell Trends in Microbiology、Wiley Journal of Eukaryotic Microbiology、Wiley Yeast、Scientific American。
+- 新增并验证：5 个 Science/AAAS eTOC、14 个 Cell Press feed，以及 Nature、Nature Methods、Nature Chemical Biology、Communications Biology、Nature Reviews Microbiology。
+- 7 个 Nature 系列官方 feed 当前返回 Client Challenge，已保留在 `文献源.csv` 并标记为 `blocked`，不会进入默认抓取。
 - ASM 和 MicrobiologyResearch 在 requests 环境下返回 Cloudflare `Just a moment`；`文献源.csv` 中暂时标为 `blocked`，需要后续 browser-backed fetcher 才能稳定抓取。
 
 ## 已知注意事项
@@ -150,6 +154,8 @@ score < 0.65 -> watchlist
 - `Publisher Correction` 类型文献可能没有摘要，但 DOI/URL 有效时仍保留。
 - 多个海外出版社对非浏览器请求有限制；采集器会给出 blocked non-browser access 错误，属于站点访问限制，不是数据结构损坏。
 - `literature_tracker.egg-info`、`__pycache__`、`.pytest_cache` 都是可删除缓存。
+- 详情页补全失败不会再用空字段覆盖已有摘要、作者、日期或 DOI；该次来源运行会标记为 `partial`，错误可在 Dashboard 查看。
+- 内容更新按具体字段记录，事件元数据中的 `changed_fields` 和 `field_changes` 可用于复核变化原因。
 
 ## 交接前检查清单
 

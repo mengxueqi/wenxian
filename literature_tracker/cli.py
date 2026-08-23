@@ -9,6 +9,7 @@ from .storage import SQLiteRepository
 from .tasks import (
     build_report,
     crawl_sources,
+    run_full_pipeline,
     run_change_detection,
     run_insight_build,
     run_process_stage,
@@ -122,6 +123,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         help="Optional source name filter, e.g. 合成生物学",
     )
+
+    run_all_parser = subparsers.add_parser(
+        "run-all",
+        help="Run crawl, process, change detection, insights, and report",
+    )
+    run_all_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DB_PATH,
+        help="Path to the SQLite database file.",
+    )
+    run_all_parser.add_argument(
+        "--source",
+        help="Optional source name filter, e.g. 合成生物学",
+    )
+    run_all_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional per-stage item limit.",
+    )
     return parser
 
 
@@ -174,6 +196,17 @@ def main() -> None:
             source_name=args.source,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "run-all":
+        summary = run_full_pipeline(
+            db_path=args.db,
+            source_name=args.source,
+            limit=args.limit,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        if summary["status"] != "success":
+            raise SystemExit(1)
         return
 
     parser.error(f"Unsupported command: {args.command}")

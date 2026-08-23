@@ -59,11 +59,19 @@ class GenericJournalCollector(BaseCollector):
         if not records and last_error is not None:
             raise last_error
 
+        if "html_detail" not in source.collector_kind.casefold():
+            return self.dedupe_by_article_url(records)
+
         enriched: list[RawRecord] = []
         for record in records[: limit or len(records)]:
             try:
-                enriched.append(self.enrich_with_citation_meta(record))
-            except Exception:
+                enriched_record = self.enrich_with_citation_meta(record)
+                enriched_record.metadata["enrichment_status"] = "success"
+                enriched_record.metadata.pop("enrichment_error", None)
+                enriched.append(enriched_record)
+            except Exception as exc:
+                record.metadata["enrichment_status"] = "failed"
+                record.metadata["enrichment_error"] = str(exc)
                 enriched.append(record)
         return self.dedupe_by_article_url(enriched)
 
@@ -236,6 +244,7 @@ class GenericJournalCollector(BaseCollector):
     @staticmethod
     def _looks_like_feed_url(url: str) -> bool:
         lowered = (url or "").casefold()
+        hostname = (urlparse(url).hostname or "").casefold()
         return (
             lowered.endswith(".rss")
             or lowered.endswith(".xml")
@@ -243,6 +252,7 @@ class GenericJournalCollector(BaseCollector):
             or "feed=rss" in lowered
             or "fmt=rss" in lowered
             or "showfeed" in lowered
+            or hostname.startswith("rss.")
         )
 
     @staticmethod
@@ -266,7 +276,7 @@ class GenericJournalCollector(BaseCollector):
         if platform == "asm":
             return "/doi/" in lowered and not lowered.rstrip("/").endswith("/doi")
         if platform == "cell":
-            return "/trends/microbiology/fulltext/" in lowered
+            return "/fulltext/" in lowered
         if platform == "nature":
             return bool(re.search(r"/articles/s\d{5}-", lowered))
         if platform == "microbiology_research":

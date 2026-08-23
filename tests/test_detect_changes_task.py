@@ -84,6 +84,56 @@ class DetectChangesTaskTests(unittest.TestCase):
             self.assertEqual(len(changes), 2)
             self.assertEqual(changes[0].change_type, "content_updated")
             self.assertIn("previous_content_hash", changes[0].metadata)
+            self.assertEqual(changes[0].metadata["changed_fields"], ["abstract"])
+            self.assertIn("摘要", changes[0].summary)
+
+    def test_detect_changes_tracks_author_and_publication_date_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "test.db"
+            repository = SQLiteRepository(db_path)
+            repository.initialize()
+            repository.upsert_raw_records(
+                [
+                    RawRecord(
+                        source_name="Test Journal",
+                        journal_name="Test Journal",
+                        listing_url="https://example.com/articles",
+                        article_url="https://example.com/article/3",
+                        title="Example Paper",
+                        authors="Alice Example",
+                        published_at="2026-07-01",
+                        doi="10.1000/field-update",
+                        collector_kind="html",
+                    )
+                ]
+            )
+            run_process_stage(db_path=db_path)
+            run_change_detection(db_path=db_path)
+
+            repository.upsert_raw_records(
+                [
+                    RawRecord(
+                        source_name="Test Journal",
+                        journal_name="Test Journal",
+                        listing_url="https://example.com/articles",
+                        article_url="https://example.com/article/3",
+                        title="Example Paper",
+                        authors="Alice Example; Bob Example",
+                        published_at="2026-07-02",
+                        doi="10.1000/field-update",
+                        collector_kind="html",
+                    )
+                ]
+            )
+            run_process_stage(db_path=db_path)
+            summary = run_change_detection(db_path=db_path)
+            change = repository.fetch_paper_changes()[0]
+
+            self.assertEqual(summary["detected_changes"], 1)
+            self.assertEqual(
+                change.metadata["changed_fields"],
+                ["authors", "published_at"],
+            )
 
     def test_detect_changes_detects_retraction_signal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

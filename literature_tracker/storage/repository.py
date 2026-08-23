@@ -21,6 +21,17 @@ from ..models import (
 
 
 class SQLiteRepository:
+    CONTENT_HASH_VERSION = 2
+    MATERIAL_METADATA_KEYS = (
+        "keywords",
+        "pdf_url",
+        "online_date",
+        "openalex_id",
+        "pubmed_id",
+        "is_retracted",
+        "is_corrected",
+    )
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
@@ -305,51 +316,62 @@ class SQLiteRepository:
 
         timestamp = datetime.now().isoformat(timespec="seconds")
         with closing(self._connect()) as connection:
-            connection.executemany(
-                """
-                INSERT INTO raw_records (
-                    source_name, journal_name, listing_url, article_url, title,
-                    authors, abstract, published_at, doi, language, collector_kind,
-                    content_text, content_hash, metadata_json, first_seen_at, last_seen_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_name, article_url) DO UPDATE SET
-                    journal_name = excluded.journal_name,
-                    title = excluded.title,
-                    authors = excluded.authors,
-                    abstract = excluded.abstract,
-                    published_at = excluded.published_at,
-                    doi = COALESCE(excluded.doi, raw_records.doi),
-                    language = excluded.language,
-                    collector_kind = excluded.collector_kind,
-                    content_text = excluded.content_text,
-                    content_hash = excluded.content_hash,
-                    metadata_json = excluded.metadata_json,
-                    last_seen_at = excluded.last_seen_at,
-                    seen_count = raw_records.seen_count + 1
-                """,
-                [
-                    (
-                        record.source_name,
-                        record.journal_name,
-                        record.listing_url,
-                        record.article_url,
-                        record.title,
-                        record.authors,
-                        record.abstract,
-                        record.published_at,
-                        record.doi,
-                        record.language,
-                        record.collector_kind,
-                        record.content_text,
-                        self._hash_record(record),
-                        json.dumps(record.metadata, ensure_ascii=False),
-                        timestamp,
-                        timestamp,
+            for record in records:
+                existing = connection.execute(
+                    """
+                    SELECT
+                        journal_name, listing_url, title, authors, abstract,
+                        published_at, doi, language, collector_kind, content_text,
+                        metadata_json
+                    FROM raw_records
+                    WHERE source_name = ? AND article_url = ?
+                    """,
+                    (record.source_name, record.article_url),
+                ).fetchone()
+                merged_record = self._merge_raw_record(record, existing, timestamp)
+                connection.execute(
+                    """
+                    INSERT INTO raw_records (
+                        source_name, journal_name, listing_url, article_url, title,
+                        authors, abstract, published_at, doi, language, collector_kind,
+                        content_text, content_hash, metadata_json, first_seen_at, last_seen_at
                     )
-                    for record in records
-                ],
-            )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_name, article_url) DO UPDATE SET
+                        journal_name = excluded.journal_name,
+                        listing_url = excluded.listing_url,
+                        title = excluded.title,
+                        authors = excluded.authors,
+                        abstract = excluded.abstract,
+                        published_at = excluded.published_at,
+                        doi = excluded.doi,
+                        language = excluded.language,
+                        collector_kind = excluded.collector_kind,
+                        content_text = excluded.content_text,
+                        content_hash = excluded.content_hash,
+                        metadata_json = excluded.metadata_json,
+                        last_seen_at = excluded.last_seen_at,
+                        seen_count = raw_records.seen_count + 1
+                    """,
+                    (
+                        merged_record.source_name,
+                        merged_record.journal_name,
+                        merged_record.listing_url,
+                        merged_record.article_url,
+                        merged_record.title,
+                        merged_record.authors,
+                        merged_record.abstract,
+                        merged_record.published_at,
+                        merged_record.doi,
+                        merged_record.language,
+                        merged_record.collector_kind,
+                        merged_record.content_text,
+                        self._hash_record(merged_record),
+                        json.dumps(merged_record.metadata, ensure_ascii=False),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
             connection.commit()
         return len(records)
 
@@ -841,6 +863,82 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def fetch_source_health(
+        self,
+        *,
+        source_name: str | None = None,
+    ) -> list[dict[str, object]]:
+        query = """
+            SELECT source_name, platform, status, notes, updated_at
+            FROM sources
+        """
+        parameters: list[object] = []
+        if source_name:
+            query += " WHERE source_name = ?"
+            parameters.append(source_name)
+        query += " ORDER BY source_name"
+
+        health_rows: list[dict[str, object]] = []
+        with closing(self._connect()) as connection:
+            for source in connection.execute(query, parameters).fetchall():
+                latest_run = connection.execute(
+                    """
+                    SELECT status, item_count, started_at, completed_at, error_message
+                    FROM crawl_runs
+                    WHERE source_name = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (source[0],),
+                ).fetchone()
+                health_rows.append(
+                    {
+                        "source_name": source[0],
+                        "platform": source[1],
+                        "source_status": source[2],
+                        "notes": source[3],
+                        "configured_at": source[4],
+                        "last_run_status": latest_run[0] if latest_run else "never",
+                        "item_count": latest_run[1] if latest_run else 0,
+                        "started_at": latest_run[2] if latest_run else None,
+                        "completed_at": latest_run[3] if latest_run else None,
+                        "error_message": latest_run[4] if latest_run else None,
+                    }
+                )
+        return health_rows
+
+    def fetch_pipeline_health(self) -> list[dict[str, object]]:
+        stages = (
+            ("process", "process_runs"),
+            ("detect_changes", "change_detection_runs"),
+            ("build_insights", "insight_build_runs"),
+            ("build_report", "report_runs"),
+        )
+        rows: list[dict[str, object]] = []
+        with closing(self._connect()) as connection:
+            for stage_name, table_name in stages:
+                latest_run = connection.execute(
+                    f"""
+                    SELECT source_name, status, item_count, started_at,
+                           completed_at, error_message
+                    FROM {table_name}
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                rows.append(
+                    {
+                        "stage": stage_name,
+                        "source_name": latest_run[0] if latest_run else "__all__",
+                        "status": latest_run[1] if latest_run else "never",
+                        "item_count": latest_run[2] if latest_run else 0,
+                        "started_at": latest_run[3] if latest_run else None,
+                        "completed_at": latest_run[4] if latest_run else None,
+                        "error_message": latest_run[5] if latest_run else None,
+                    }
+                )
+        return rows
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
@@ -1069,17 +1167,145 @@ class SQLiteRepository:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _merge_raw_record(
+        self,
+        record: RawRecord,
+        existing: tuple[object, ...] | None,
+        timestamp: str,
+    ) -> RawRecord:
+        if existing is None:
+            metadata = dict(record.metadata)
+            metadata["content_hash_version"] = self.CONTENT_HASH_VERSION
+            return RawRecord(
+                source_name=record.source_name,
+                journal_name=record.journal_name,
+                listing_url=record.listing_url,
+                article_url=record.article_url,
+                title=record.title,
+                authors=record.authors,
+                abstract=record.abstract,
+                published_at=record.published_at,
+                doi=record.doi,
+                language=record.language,
+                collector_kind=record.collector_kind,
+                content_text=record.content_text,
+                metadata=metadata,
+            )
+
+        existing_metadata = self._loads_json(str(existing[10] or "{}"))
+        previous_record = RawRecord(
+            source_name=record.source_name,
+            journal_name=str(existing[0] or ""),
+            listing_url=str(existing[1] or ""),
+            article_url=record.article_url,
+            title=str(existing[2] or ""),
+            authors=str(existing[3] or ""),
+            abstract=str(existing[4] or ""),
+            published_at=str(existing[5]) if existing[5] else None,
+            doi=str(existing[6]) if existing[6] else None,
+            language=str(existing[7]) if existing[7] else None,
+            collector_kind=str(existing[8] or ""),
+            content_text=str(existing[9] or ""),
+            metadata=existing_metadata,
+        )
+        metadata = self._merge_metadata(existing_metadata, record.metadata)
+        metadata["content_hash_version"] = self.CONTENT_HASH_VERSION
+        merged_record = RawRecord(
+            source_name=record.source_name,
+            journal_name=self._prefer_value(record.journal_name, previous_record.journal_name),
+            listing_url=self._prefer_value(record.listing_url, previous_record.listing_url),
+            article_url=record.article_url,
+            title=self._prefer_value(record.title, previous_record.title),
+            authors=self._prefer_value(record.authors, previous_record.authors),
+            abstract=self._prefer_value(record.abstract, previous_record.abstract),
+            published_at=self._prefer_optional(record.published_at, previous_record.published_at),
+            doi=self._prefer_optional(record.doi, previous_record.doi),
+            language=self._prefer_optional(record.language, previous_record.language),
+            collector_kind=self._prefer_value(
+                record.collector_kind,
+                previous_record.collector_kind,
+            ),
+            content_text=self._prefer_value(record.content_text, previous_record.content_text),
+            metadata=metadata,
+        )
+
+        previous_snapshot = self._material_snapshot(previous_record)
+        current_snapshot = self._material_snapshot(merged_record)
+        field_changes = {
+            field_name: {
+                "before": previous_snapshot.get(field_name),
+                "after": current_snapshot.get(field_name),
+            }
+            for field_name in current_snapshot
+            if previous_snapshot.get(field_name) != current_snapshot.get(field_name)
+        }
+        if field_changes:
+            merged_record.metadata["field_changes"] = field_changes
+            merged_record.metadata["fields_changed_at"] = timestamp
+        return merged_record
+
+    @classmethod
+    def _merge_metadata(
+        cls,
+        existing: dict[str, object],
+        incoming: dict[str, object],
+    ) -> dict[str, object]:
+        merged = dict(existing)
+        for key, value in incoming.items():
+            if cls._has_value(value):
+                merged[key] = value
+        if incoming.get("enrichment_status") == "success":
+            merged.pop("enrichment_error", None)
+        return merged
+
     @staticmethod
-    def _hash_record(record: RawRecord) -> str:
-        payload = "||".join(
-            [
-                record.source_name,
-                record.article_url,
-                record.title,
-                record.abstract,
-                record.doi or "",
-                json.dumps(record.metadata, ensure_ascii=False, sort_keys=True),
-            ]
+    def _has_value(value: object) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, dict)):
+            return bool(value)
+        return True
+
+    @staticmethod
+    def _prefer_value(incoming: str, existing: str) -> str:
+        return incoming if incoming.strip() else existing
+
+    @staticmethod
+    def _prefer_optional(incoming: str | None, existing: str | None) -> str | None:
+        if incoming is not None and incoming.strip():
+            return incoming
+        return existing
+
+    @classmethod
+    def _material_snapshot(cls, record: RawRecord) -> dict[str, object]:
+        snapshot: dict[str, object] = {
+            "title": record.title.strip(),
+            "authors": record.authors.strip(),
+            "abstract": record.abstract.strip(),
+            "published_at": (record.published_at or "").strip(),
+            "doi": (record.doi or "").strip().casefold(),
+            "language": (record.language or "").strip().casefold(),
+        }
+        for key in cls.MATERIAL_METADATA_KEYS:
+            value = record.metadata.get(key)
+            if isinstance(value, list):
+                snapshot[key] = sorted(
+                    {str(item).strip() for item in value if str(item).strip()},
+                    key=str.casefold,
+                )
+            else:
+                snapshot[key] = value if value is not None else ""
+        return snapshot
+
+    @classmethod
+    def _hash_record(cls, record: RawRecord) -> str:
+        payload = json.dumps(
+            cls._material_snapshot(record),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

@@ -11,7 +11,7 @@
 - 提供 Streamlit UI：
   - `Focus`：最近 30 天入库、评分最高的 10 篇文献。
   - `Library`：完整文献队列，支持来源、状态、变化类型、关键词、最低分筛选。
-  - `Dashboard`：来源、变化、跟踪状态概览。
+  - `Dashboard`：来源、变化、跟踪状态及抓取/流水线健康状态概览。
   - `Change Analysis`：按批次查看新文献。
 - 导出 Tracking CSV、Changes CSV、Papers CSV 和 Markdown 报告。
 
@@ -19,21 +19,12 @@
 
 配置文件：[文献源.csv](./文献源.csv)
 
-| 来源 | 网站 | 平台 | 抓取入口 | 说明 |
-|---|---|---|---|---|
-| 合成生物学 | `https://synbioj.cip.com.cn/CN/2096-8280/home.shtml` | `magtech_cip` | RSS `rss_zxly_2096-8280.xml` | RSS 优先，失败时回退最新文章列表；详情页补 DOI、作者、摘要、PDF |
-| Advanced Biotechnology | `https://link.springer.com/journal/44307` | `springer` | `/articles` | Springer 列表页 + 详情页 citation meta |
-| Journal of Biological Engineering | `https://link.springer.com/journal/13036` | `springer` | `/online-first` | online-first 优先，必要时 fallback 到 `/articles` |
-| Metabolic Engineering | `https://www.sciencedirect.com/journal/metabolic-engineering` | `sciencedirect` | ScienceDirect RSS `10967176` | RSS 可读；详情页可能阻断 requests；DOI/关键词可用 OpenAlex 补全，摘要仍取决于可用元数据 |
-| Synthetic Biology | `https://academic.oup.com/synbio` | `oup` | OUP Advance Access RSS | 先抓 advance access，再补当前期 RSS |
-| Scientific American | `https://www.scientificamerican.com/` | `scientific_american` | 官方 RSS | 科学新闻源，通常没有 DOI |
-| Journal of Bacteriology | `https://journals.asm.org/journal/jb` | `asm` | `/toc/jb/current` | 当前标记为 `blocked`；ASM/Literatum 页面需要 browser-backed fetcher |
-| Trends in Microbiology | `https://www.cell.com/trends/microbiology/home` | `cell` | `inpress.rss` | 先抓 in press RSS，再补 current RSS |
-| Nature Reviews Microbiology | `https://www.nature.com/nrmicro/` | `nature` | `nrmicro.rss` | RSS 优先，失败时 fallback 到 `/articles` |
-| Annals of Microbiology | `https://link.springer.com/journal/13213` | `springer` | `/articles` | Springer 列表页；用户链接里的 tracking 参数已清理 |
-| Microbiology | `https://www.microbiologyresearch.org/content/journal/micro` | `microbiology_research` | 官方 latest issue RSS | 当前标记为 `blocked`；MicrobiologyResearch 会触发 Cloudflare 阻断 |
-| Journal of Eukaryotic Microbiology | `https://onlinelibrary.wiley.com/journal/15507408` | `wiley` | Wiley eTOC RSS | 用户重复给出的 Wiley 15507408 只保留一条 |
-| Yeast | `https://onlinelibrary.wiley.com/journal/10970061` | `wiley` | Wiley eTOC RSS | RSS 可读，详情页用于可选补全 |
+当前共配置 42 个来源，其中 33 个 `active`、9 个 `blocked`。完整 URL、平台、状态和限制以 CSV 为准。
+
+- **Nature 系列**：Nature、Nature Methods、Nature Chemical Biology、Communications Biology、Nature Reviews Microbiology 可直接抓取；Nature Biotechnology、Nature Communications、Nature Microbiology、Nature Genetics、Nature Cell Biology、Nature Metabolism、Nature Biomedical Engineering 当前因官方 feed 返回 Client Challenge 标记为 `blocked`。
+- **Science 系列**：Science、Science Advances、Science Translational Medicine、Science Signaling、Science Immunology，使用 AAAS 官方 eTOC feed，直接采用 feed 中的 DOI、作者和摘要元数据。
+- **Cell Press 系列**：Cell、Molecular Cell、Cell Systems、Cell Metabolism、Cell Chemical Biology、Cell Host & Microbe、Developmental Cell、Current Biology、Immunity、Trends in Biotechnology、Trends in Cell Biology、Trends in Genetics、Trends in Biochemical Sciences，以及原有 Trends in Microbiology；使用 in-press/current feed 元数据。
+- **其他来源**：合成生物学、Advanced Biotechnology、Journal of Biological Engineering、Metabolic Engineering、Synthetic Biology、Scientific American、Annals of Microbiology、Journal of Eukaryotic Microbiology、Yeast；Journal of Bacteriology 和 Microbiology 当前为 `blocked`。
 
 ## 新电脑部署
 
@@ -72,12 +63,10 @@ data/reports/latest_report.md
 完整流水线：
 
 ```powershell
-python -m literature_tracker.cli crawl
-python -m literature_tracker.cli process
-python -m literature_tracker.cli detect-changes
-python -m literature_tracker.cli build-insights
-python -m literature_tracker.cli build-report
+python -m literature_tracker.cli run-all
 ```
+
+该命令依次执行抓取、规范化、变化检测、评分和报告。任一来源抓取失败或详情补全不完整时会返回非零退出码，适合计划任务识别异常。各阶段仍可使用原有独立命令调试。
 
 只抓取某个来源：
 
@@ -94,6 +83,20 @@ python -m literature_tracker.cli build-report --source "合成生物学"
 ```powershell
 streamlit run ui_app.py
 ```
+
+安装每日自动更新任务（默认每天 13:00）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_literature_tracker_task.ps1
+```
+
+也可指定其他时间：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_literature_tracker_task.ps1 -DailyAt "06:30"
+```
+
+计划任务由无窗口的 `wscript.exe` 启动，在后台静默执行文献抓取、入库、变化检测、评分和报告生成。错过 13:00 时会在电脑恢复可用后补执行，已有任务运行时不会重复启动。日志位于 `data/scheduled_update.log`，脚本优先使用 `.venv\Scripts\python.exe`。修改安装脚本后需重新运行一次安装命令，系统中已有任务才会更新。
 
 运行测试：
 
@@ -126,9 +129,9 @@ change_base_score 最高 0.20
 - retraction_notice: 0.20
 - 其他: 0.12
 
-theme_score = min(0.40, 0.15 * 命中主题数)
+theme_score = min(0.40, 各命中主题的 score_weight 之和)
 
-author_score = 0.40，只要命中重点作者列表
+author_score = min(0.40, 各命中作者的 score_weight 之和)
 
 recent_activity_score = 0.20，最近 30 天内入库/更新
 ```
@@ -153,7 +156,7 @@ literature_tracker/
   tasks/           # CLI 任务编排
   ui/              # Streamlit 应用
 tests/             # 单元测试
-config/            # 作者 watchlist 等配置
+config/            # 作者、主题和评分权重配置
 data/              # SQLite 数据库和报告，git 忽略
 ```
 
@@ -174,8 +177,16 @@ data/literature_tracker.db
 - `paper_insights`：每条变化对应的评分、摘要、理由和元数据。
 - `tracking_items`：每篇文献当前应关注的最高优先级记录。
 
+## 规则配置
+
+- `config/theme_watchlist.csv`：`theme_name`、以 `|` 分隔的关键词、`score_weight`、`enabled`。
+- `config/author_watchlist.csv`：作者名、别名、关注领域、`score_weight`、`enabled`。
+- 修改配置后再次运行 `build-insights` 或 `run-all` 即可重新计算；不需要修改 Python 代码。
+
+内容更新采用字段级检测，当前覆盖标题、作者、摘要、发布日期、DOI、语言、关键词、PDF 地址以及撤稿/更正状态。详情页补全失败会保留已有完整字段，并在 Dashboard 中标记为 `partial`。
+
 ## 注意事项
 
-- Springer 页面有时会缺少标准摘要，特别是 `Publisher Correction` 或 commentary 类型页面。
+- 3 个 Springer 来源通过 Crossref ISSN API 抓取，避免网页反爬；Crossref 未提供摘要时仍保留 DOI、标题、作者和发表日期。
 - `合成生物学` 的 Magtech/CIP 页面完整摘要位于页面正文的 `摘要/Abstract` 面板中，采集器已做专门解析。
 - 新电脑迁移时，代码可以走 git；数据库和报告需要单独复制 `data/`。

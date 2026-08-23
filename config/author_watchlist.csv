@@ -1,4 +1,4 @@
-author_name,aliases,field_hint
+author_name,aliases,field_hint,score_weight,enabled
 Jay Keasling,,synthetic_biology
 Sang Yup Lee,,metabolic_engineering
 Jens Nielsen,,systems_biology
