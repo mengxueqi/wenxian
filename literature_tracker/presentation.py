@@ -7,20 +7,33 @@ from datetime import datetime, timedelta
 from io import StringIO
 from typing import Any
 
-from .models import StoredPaper, StoredPaperChange
+from .models import SourceConfig, StoredPaper, StoredPaperChange
 from .storage import SQLiteRepository
-
-SORT_OPTIONS = {
-    "priority_desc": "Priority (high to low)",
-    "published_desc": "Published date (newest first)",
-    "title_asc": "Title (A-Z)",
-    "source_asc": "Source (A-Z)",
-}
 
 PRIORITY_REVIEW_THRESHOLD = 0.85
 TRACKING_STATUS_ALIASES = {
     "priority": "review",
 }
+
+SOURCE_HEALTH_LABELS = {
+    "healthy": "正常", "running": "抓取中", "never": "未运行", "stale": "超过两天未更新",
+    "partial": "部分失败", "failed": "失败", "blocked": "访问受限", "disabled": "已停用",
+}
+SOURCE_HEALTH_ORDER = {state: index for index, state in enumerate(SOURCE_HEALTH_LABELS)}
+
+
+def build_source_status_rows(health: list[dict[str, Any]], sources: list[SourceConfig]) -> list[dict[str, str]]:
+    configured = {source.source_name: source.canonical_url for source in sources}
+    visible = [row for row in health if row["source_name"] in configured]
+    visible.sort(key=lambda row: (SOURCE_HEALTH_ORDER.get(row["health_state"], 5), row["source_name"].casefold()))
+    return [
+        {
+            "数据源": row["source_name"],
+            "状态": SOURCE_HEALTH_LABELS.get(row["health_state"], row["health_state"]),
+            "网址": configured[row["source_name"]],
+        }
+        for row in visible
+    ]
 
 
 def build_snapshot(
@@ -73,7 +86,7 @@ def build_snapshot(
                 "latest_change_at": getattr(latest_change, "detected_at", None),
                 "insight_summary": best_insight["summary"] if best_insight else None,
                 "insight_reason": best_insight["reason"] if best_insight else None,
-                "keywords": _metadata_keywords(paper_metadata),
+                "keywords": metadata_keywords(paper_metadata),
                 "source_summary": _source_summary(paper_metadata),
                 "themes": themes,
             }
@@ -117,6 +130,7 @@ def build_run_health(
     source_name: str | None = None,
     now: datetime | None = None,
     stale_after: timedelta = timedelta(days=2),
+    include_pipeline: bool = True,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     current_time = now or datetime.now()
     source_rows = [
@@ -137,7 +151,7 @@ def build_run_health(
             configured_status="active",
             run_status=str(row.get("status") or "never"),
         )
-        for row in repository.fetch_pipeline_health()
+        for row in (repository.fetch_pipeline_health() if include_pipeline else [])
     ]
     return source_rows, pipeline_rows
 
@@ -206,113 +220,6 @@ def build_markdown_report(
     return "\n".join(lines).strip() + "\n"
 
 
-def build_filter_options(snapshot: dict[str, Any]) -> dict[str, list[str]]:
-    return {
-        "tracking_statuses": sorted(
-            {
-                card["tracking_status"]
-                for card in snapshot["focus_cards"]
-                if card.get("tracking_status")
-            }
-        ),
-        "change_types": sorted(
-            {change.change_type for change in snapshot["changes"] if change.change_type}
-        ),
-        "themes": sorted(
-            {
-                theme
-                for card in snapshot["focus_cards"]
-                for theme in card.get("themes", [])
-                if theme
-            }
-        ),
-    }
-
-
-def build_filtered_snapshot(
-    snapshot: dict[str, Any],
-    *,
-    query: str = "",
-    tracking_statuses: list[str] | None = None,
-    change_types: list[str] | None = None,
-    themes: list[str] | None = None,
-    min_priority: float = 0.0,
-    sort_by: str = "priority_desc",
-) -> dict[str, Any]:
-    tracking_status_set = set(tracking_statuses or [])
-    change_type_set = set(change_types or [])
-    theme_set = set(themes or [])
-
-    allowed_paper_ids = {
-        change.paper_id
-        for change in snapshot["changes"]
-        if not change_type_set or change.change_type in change_type_set
-    }
-
-    filtered_cards = [
-        card
-        for card in snapshot["focus_cards"]
-        if card["paper_id"] in allowed_paper_ids
-        and _card_matches(
-            card,
-            query=query,
-            tracking_statuses=tracking_status_set,
-            themes=theme_set,
-            min_priority=min_priority,
-        )
-    ]
-    filtered_cards = sort_focus_cards(filtered_cards, sort_by=sort_by)
-    visible_paper_ids = {card["paper_id"] for card in filtered_cards}
-
-    filtered_papers = [paper for paper in snapshot["papers"] if paper.id in visible_paper_ids]
-    filtered_changes = [
-        change
-        for change in snapshot["changes"]
-        if change.paper_id in visible_paper_ids
-        and (not change_type_set or change.change_type in change_type_set)
-    ]
-    filtered_change_ids = {change.id for change in filtered_changes}
-    filtered_insights = [
-        insight
-        for insight in snapshot["insights"]
-        if insight["paper_id"] in visible_paper_ids
-        and (
-            not change_type_set
-            or insight["change_id"] in filtered_change_ids
-        )
-    ]
-    filtered_tracking_items = [
-        item for item in snapshot["tracking_items"] if item["paper_id"] in visible_paper_ids
-    ]
-
-    return {
-        "metrics": {
-            "papers": len(filtered_papers),
-            "changes": len(filtered_changes),
-            "insights": len(filtered_insights),
-            "tracking_items": len(filtered_tracking_items),
-        },
-        "focus_cards": filtered_cards,
-        "source_summary": _build_source_summary(
-            filtered_papers,
-            filtered_changes,
-            filtered_tracking_items,
-            filtered_insights,
-        ),
-        "change_breakdown": dict(Counter(change.change_type for change in filtered_changes)),
-        "tracking_breakdown": dict(
-            Counter(
-                _tracking_status_label(item["tracking_status"])
-                for item in filtered_tracking_items
-            )
-        ),
-        "papers": filtered_papers,
-        "changes": filtered_changes,
-        "insights": filtered_insights,
-        "tracking_items": filtered_tracking_items,
-    }
-
-
 def sort_focus_cards(cards: list[dict[str, Any]], *, sort_by: str) -> list[dict[str, Any]]:
     sorters = {
         "priority_desc": lambda card: (
@@ -334,194 +241,6 @@ def sort_focus_cards(cards: list[dict[str, Any]], *, sort_by: str) -> list[dict[
     reverse = sort_by in {"priority_desc", "published_desc"}
     key_fn = sorters.get(sort_by, sorters["priority_desc"])
     return sorted(cards, key=key_fn, reverse=reverse)
-
-
-def build_recent_focus_cards(
-    snapshot: dict[str, Any],
-    *,
-    days: int = 30,
-    limit: int = 10,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    current_time = now or datetime.now()
-    window = timedelta(days=days)
-    recent_cards = [
-        card
-        for card in snapshot["focus_cards"]
-        if _is_recent_card(card, now=current_time, window=window)
-    ]
-    return sort_focus_cards(recent_cards, sort_by="priority_desc")[:limit]
-
-
-def build_tracking_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {
-            "paper_id": card["paper_id"],
-            "source_name": card["source_name"],
-            "title": card["title"],
-            "journal_name": card["journal_name"],
-            "published_at": card["published_at"],
-            "tracking_status": card["tracking_status"],
-            "priority_score": card["priority_score"],
-            "latest_change_type": card["latest_change_type"],
-            "themes": ", ".join(card["themes"]),
-            "article_url": card["article_url"],
-        }
-        for card in snapshot["focus_cards"]
-    ]
-
-
-def build_change_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    insights_by_change = {row["change_id"]: row for row in snapshot["insights"]}
-    papers_by_id = {paper.id: paper for paper in snapshot["papers"]}
-    rows: list[dict[str, Any]] = []
-    for change in snapshot["changes"]:
-        paper = papers_by_id.get(change.paper_id)
-        insight = insights_by_change.get(change.id)
-        rows.append(
-            {
-                "change_id": change.id,
-                "paper_id": change.paper_id,
-                "source_name": change.source_name,
-                "title": paper.canonical_title if paper else "",
-                "change_type": change.change_type,
-                "change_summary": change.summary,
-                "detected_at": change.detected_at,
-                "priority_score": insight["score"] if insight else None,
-                "themes": ", ".join((insight or {}).get("metadata", {}).get("themes", [])),
-                "reason": insight["reason"] if insight else "",
-                "article_url": paper.article_url if paper else "",
-            }
-        )
-    return rows
-
-
-def build_new_paper_batch_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = build_new_paper_rows(snapshot)
-    if not rows:
-        return []
-
-    rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        rows_by_date[row["batch_date"]].append(row)
-
-    batches: list[dict[str, Any]] = []
-    for batch_date, batch_rows in rows_by_date.items():
-        paper_ids = {row["paper_id"] for row in batch_rows}
-        source_names = {row["source_name"] for row in batch_rows if row["source_name"]}
-        priority_items = sum(
-            1
-            for row in batch_rows
-            if float(row["priority_score"] or 0) >= PRIORITY_REVIEW_THRESHOLD
-        )
-        batches.append(
-            {
-                "batch_date": batch_date,
-                "new_papers": len(paper_ids),
-                "existing_papers_before_batch": _count_existing_papers_before_batch(
-                    snapshot,
-                    rows,
-                    batch_date,
-                ),
-                "source_count": len(source_names),
-                "sources": ", ".join(sorted(source_names)),
-                "priority_items": priority_items,
-            }
-        )
-
-    return sorted(batches, key=lambda row: row["batch_date"], reverse=True)
-
-
-def build_new_paper_rows(
-    snapshot: dict[str, Any],
-    *,
-    batch_date: str | None = None,
-) -> list[dict[str, Any]]:
-    papers_by_id = {paper.id: paper for paper in snapshot["papers"]}
-    insights_by_change = {row["change_id"]: row for row in snapshot["insights"]}
-    tracking_by_paper = {item["paper_id"]: item for item in snapshot["tracking_items"]}
-
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-    for change in snapshot["changes"]:
-        if change.change_type != "new_paper":
-            continue
-        change_date = _date_part(change.detected_at)
-        if batch_date is not None and change_date != batch_date:
-            continue
-        dedupe_key = (change_date, change.paper_id)
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-
-        paper = papers_by_id.get(change.paper_id)
-        insight = insights_by_change.get(change.id)
-        tracking = tracking_by_paper.get(change.paper_id, {})
-        insight_metadata = (insight or {}).get("metadata", {})
-        tracking_metadata = tracking.get("metadata", {}) if tracking else {}
-        themes = insight_metadata.get("themes") or tracking_metadata.get("themes", [])
-        themes_text = ", ".join(themes) if isinstance(themes, list) else str(themes or "")
-        priority_score = tracking.get("priority_score") if tracking else None
-        if priority_score is None and insight:
-            priority_score = insight["score"]
-        rows.append(
-            {
-                "batch_date": change_date,
-                "detected_at": change.detected_at,
-                "paper_id": change.paper_id,
-                "source_name": change.source_name,
-                "journal_name": paper.journal_name if paper else "",
-                "title": paper.canonical_title if paper else "",
-                "doi": paper.doi if paper else "",
-                "published_at": paper.published_at if paper else "",
-                "priority_score": priority_score,
-                "tracking_status": _tracking_status_label(
-                    tracking.get("tracking_status", "")
-                )
-                if tracking
-                else "",
-                "themes": themes_text,
-                "reason": insight["reason"] if insight else "",
-                "article_url": paper.article_url if paper else "",
-            }
-        )
-
-    return sorted(
-        rows,
-        key=lambda row: (
-            row["batch_date"],
-            str(row["detected_at"] or ""),
-            float(row["priority_score"] or 0),
-            row["title"].casefold(),
-        ),
-        reverse=True,
-    )
-
-
-def build_paper_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    tracking_by_paper = {item["paper_id"]: item for item in snapshot["tracking_items"]}
-
-    rows: list[dict[str, Any]] = []
-    for paper in snapshot["papers"]:
-        tracking = tracking_by_paper.get(paper.id)
-        rows.append(
-            {
-                "paper_id": paper.id,
-                "source_name": paper.source_name,
-                "journal_name": paper.journal_name,
-                "title": paper.canonical_title,
-                "doi": paper.doi,
-                "published_at": paper.published_at,
-                "status": paper.status,
-                "tracking_status": _tracking_status_label(tracking["tracking_status"])
-                if tracking
-                else "",
-                "priority_score": tracking["priority_score"] if tracking else None,
-                "themes": ", ".join((tracking or {}).get("metadata", {}).get("themes", [])),
-                "article_url": paper.article_url,
-            }
-        )
-    return rows
 
 
 def rows_to_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
@@ -593,46 +312,12 @@ def _build_source_summary(
     ]
 
 
-def _card_matches(
-    card: dict[str, Any],
-    *,
-    query: str,
-    tracking_statuses: set[str],
-    themes: set[str],
-    min_priority: float,
-) -> bool:
-    if tracking_statuses and card["tracking_status"] not in tracking_statuses:
-        return False
-    if themes and not themes.intersection(set(card["themes"] or [])):
-        return False
-    if float(card["priority_score"] or 0) < min_priority:
-        return False
-    if not query.strip():
-        return True
-    normalized_query = query.strip().casefold()
-    text_blob = " ".join(
-        str(value or "")
-        for value in (
-            card["title"],
-            card["source_name"],
-            card["journal_name"],
-            card["doi"],
-            card["latest_change_type"],
-            card["latest_change_summary"],
-            card["insight_summary"],
-            card["insight_reason"],
-            " ".join(card["themes"] or []),
-        )
-    ).casefold()
-    return normalized_query in text_blob
-
-
 def _tracking_status_label(value: object) -> str:
     status = str(value or "").strip()
     return TRACKING_STATUS_ALIASES.get(status.casefold(), status)
 
 
-def _metadata_keywords(metadata: dict[str, Any]) -> list[str]:
+def metadata_keywords(metadata: dict[str, Any]) -> list[str]:
     raw_keywords = metadata.get("keywords", [])
     if isinstance(raw_keywords, str):
         values = [
@@ -665,19 +350,6 @@ def _is_priority_item(item: dict[str, Any]) -> bool:
         return float(item.get("priority_score") or 0) >= PRIORITY_REVIEW_THRESHOLD
     except (TypeError, ValueError):
         return False
-
-
-def _is_recent_card(
-    card: dict[str, Any],
-    *,
-    now: datetime,
-    window: timedelta,
-) -> bool:
-    created_at = _parse_datetime(card.get("created_at"))
-    if created_at is None:
-        return False
-    age = now - created_at
-    return timedelta(0) <= age <= window
 
 
 def _with_health_state(
@@ -715,39 +387,6 @@ def _parse_datetime(value: object) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-def _count_existing_papers_before_batch(
-    snapshot: dict[str, Any],
-    new_paper_rows: list[dict[str, Any]],
-    batch_date: str,
-) -> int:
-    first_new_date_by_paper: dict[int, str] = {}
-    for row in new_paper_rows:
-        paper_id = int(row["paper_id"])
-        current_date = first_new_date_by_paper.get(paper_id)
-        if current_date is None or row["batch_date"] < current_date:
-            first_new_date_by_paper[paper_id] = row["batch_date"]
-
-    count = 0
-    for paper in snapshot["papers"]:
-        first_new_date = first_new_date_by_paper.get(paper.id)
-        if first_new_date:
-            if first_new_date < batch_date:
-                count += 1
-            continue
-
-        paper_date = _date_part(paper.created_at or paper.updated_at or paper.published_at)
-        if paper_date and paper_date < batch_date:
-            count += 1
-    return count
-
-
-def _date_part(value: object) -> str:
-    text = str(value or "").strip()
-    if len(text) >= 10:
-        return text[:10]
-    return "unknown"
 
 
 def _csv_value(value: Any) -> Any:

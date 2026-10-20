@@ -4,25 +4,11 @@ from datetime import datetime
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
-from literature_tracker.models import RawRecord
-from literature_tracker.models import StoredPaper, StoredPaperChange
-from literature_tracker.presentation import (
-    build_filter_options,
-    build_filtered_snapshot,
-    build_new_paper_batch_rows,
-    build_new_paper_rows,
-    build_recent_focus_cards,
-    build_run_health,
-    build_snapshot,
-    rows_to_csv_bytes,
-)
+from literature_tracker.presentation import build_run_health, build_source_status_rows, rows_to_csv_bytes
+from literature_tracker.models import SourceConfig
 from literature_tracker.storage import SQLiteRepository
-from literature_tracker.tasks import (
-    run_change_detection,
-    run_insight_build,
-    run_process_stage,
-)
 
 
 class PresentationTests(unittest.TestCase):
@@ -46,119 +32,6 @@ class PresentationTests(unittest.TestCase):
             self.assertEqual(pipeline_health[0]["health_state"], "stale")
             self.assertEqual(pipeline_health[1]["health_state"], "never")
 
-    def test_build_filtered_snapshot_applies_filters_and_sorting(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "test.db"
-            repository = SQLiteRepository(db_path)
-            repository.initialize()
-            repository.upsert_raw_records(
-                [
-                    RawRecord(
-                        source_name="Source A",
-                        journal_name="Source A",
-                        listing_url="https://example.com/a/articles",
-                        article_url="https://example.com/a/1",
-                        title="CRISPR synthetic biology advance",
-                        abstract="A synthetic biology article using CRISPR tools.",
-                        doi="10.1000/a1",
-                        collector_kind="html",
-                        metadata={
-                            "keywords": ["CRISPR", "Synthetic biology"],
-                            "feed_summary": "Source-provided summary.",
-                        },
-                    ),
-                    RawRecord(
-                        source_name="Source B",
-                        journal_name="Source B",
-                        listing_url="https://example.com/b/articles",
-                        article_url="https://example.com/b/1",
-                        title="Retraction Note: CRISPR synthetic biology vesicle delivery study",
-                        authors="Jay Keasling; Other Author",
-                        abstract="This retracted synthetic biology article uses CRISPR tools.",
-                        doi="10.1000/b1",
-                        collector_kind="html",
-                    ),
-                ]
-            )
-            run_process_stage(db_path=db_path)
-            run_change_detection(db_path=db_path)
-            run_insight_build(db_path=db_path)
-
-            snapshot = build_snapshot(repository)
-            filtered = build_filtered_snapshot(
-                snapshot,
-                query="retraction",
-                tracking_statuses=["review"],
-                change_types=["retraction_notice"],
-                sort_by="title_asc",
-            )
-
-            self.assertEqual(filtered["metrics"]["papers"], 1)
-            self.assertEqual(filtered["metrics"]["changes"], 1)
-            self.assertEqual(
-                filtered["focus_cards"][0]["title"],
-                "Retraction Note: CRISPR synthetic biology vesicle delivery study",
-            )
-            self.assertEqual(
-                filtered["focus_cards"][0]["abstract"],
-                "This retracted synthetic biology article uses CRISPR tools.",
-            )
-            self.assertEqual(filtered["focus_cards"][0]["tracking_status"], "review")
-
-            source_a_card = next(
-                card
-                for card in snapshot["focus_cards"]
-                if card["title"] == "CRISPR synthetic biology advance"
-            )
-            self.assertEqual(source_a_card["keywords"], ["CRISPR", "Synthetic biology"])
-            self.assertEqual(source_a_card["source_summary"], "Source-provided summary.")
-
-    def test_build_filter_options_collects_current_snapshot_values(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "test.db"
-            repository = SQLiteRepository(db_path)
-            repository.initialize()
-            repository.upsert_raw_records(
-                [
-                    RawRecord(
-                        source_name="Source A",
-                        journal_name="Source A",
-                        listing_url="https://example.com/a/articles",
-                        article_url="https://example.com/a/1",
-                        title="CRISPR synthetic biology advance",
-                        abstract="A synthetic biology article using CRISPR tools.",
-                        doi="10.1000/a1",
-                        collector_kind="html",
-                    ),
-                    RawRecord(
-                        source_name="Source B",
-                        journal_name="Source B",
-                        listing_url="https://example.com/b/articles",
-                        article_url="https://example.com/b/1",
-                        title="Retraction Note: CRISPR synthetic biology vesicle delivery study",
-                        authors="Jay Keasling; Other Author",
-                        abstract="This retracted synthetic biology article uses CRISPR tools.",
-                        doi="10.1000/b1",
-                        collector_kind="html",
-                    ),
-                ]
-            )
-            run_process_stage(db_path=db_path)
-            run_change_detection(db_path=db_path)
-            run_insight_build(db_path=db_path)
-
-            snapshot = build_snapshot(repository)
-            options = build_filter_options(snapshot)
-
-            self.assertIn("watchlist", options["tracking_statuses"])
-            self.assertIn("review", options["tracking_statuses"])
-            self.assertNotIn("priority", options["tracking_statuses"])
-            self.assertNotIn("score_labels", options)
-            self.assertIn("new_paper", options["change_types"])
-            self.assertIn("retraction_notice", options["change_types"])
-            self.assertIn("crispr", options["themes"])
-            self.assertIn("synthetic_biology", options["themes"])
-
     def test_rows_to_csv_bytes_serializes_lists_and_dicts(self) -> None:
         payload = rows_to_csv_bytes(
             [
@@ -174,104 +47,22 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("crispr, synthetic_biology", payload)
         self.assertIn("Source A", payload)
 
-    def test_build_recent_focus_cards_returns_top_recent_cards_by_priority(self) -> None:
-        snapshot = {
-            "focus_cards": [
-                {
-                    "paper_id": index,
-                    "title": f"Recent Paper {index}",
-                    "published_at": "2026-04-20",
-                    "created_at": f"2026-04-{20 + index % 5:02d}T09:00:00",
-                    "priority_score": index / 100,
-                }
-                for index in range(1, 13)
-            ]
-            + [
-                {
-                    "paper_id": 99,
-                    "title": "Old High Score Paper",
-                    "published_at": "2026-03-01",
-                    "created_at": "2026-03-01T09:00:00",
-                    "priority_score": 0.99,
-                }
-            ]
-        }
+    def test_source_only_health_does_not_query_pipeline(self) -> None:
+        repository = Mock(spec=SQLiteRepository)
+        repository.fetch_source_health.return_value = [
+            {"source_name": "Test", "source_status": "active", "last_run_status": "partial"},
+        ]
+        sources, pipeline = build_run_health(repository, include_pipeline=False)
+        self.assertEqual(sources[0]["health_state"], "partial")
+        self.assertEqual(pipeline, [])
+        repository.fetch_pipeline_health.assert_not_called()
 
-        cards = build_recent_focus_cards(
-            snapshot,
-            now=datetime(2026, 5, 6, 9, 0, 0),
-        )
-
-        self.assertEqual(len(cards), 10)
-        self.assertEqual(cards[0]["title"], "Recent Paper 12")
-        self.assertEqual(cards[-1]["title"], "Recent Paper 3")
-        self.assertNotIn("Old High Score Paper", {card["title"] for card in cards})
-
-    def test_new_paper_batches_group_by_detected_date_and_dedupe_papers(self) -> None:
-        snapshot = {
-            "papers": [
-                StoredPaper(
-                    id=1,
-                    raw_record_id=1,
-                    paper_key="old",
-                    source_name="Source A",
-                    journal_name="Source A",
-                    article_url="https://example.com/old",
-                    doi="10.1000/old",
-                    canonical_title="Existing Paper",
-                    normalized_authors="",
-                    published_at="2026-04-20",
-                    created_at="2026-04-27T09:00:00",
-                    updated_at="2026-04-27T09:00:00",
-                ),
-                StoredPaper(
-                    id=2,
-                    raw_record_id=2,
-                    paper_key="new-a",
-                    source_name="Source A",
-                    journal_name="Source A",
-                    article_url="https://example.com/a",
-                    doi="10.1000/a",
-                    canonical_title="New Paper A",
-                    normalized_authors="",
-                    published_at="2026-04-28",
-                    created_at="2026-04-28T10:00:00",
-                    updated_at="2026-04-28T10:00:00",
-                ),
-            ],
-            "changes": [
-                StoredPaperChange(
-                    id=1,
-                    change_key="new-a",
-                    paper_id=2,
-                    source_name="Source A",
-                    change_type="new_paper",
-                    summary="New Paper A",
-                    detected_at="2026-04-28T10:00:00",
-                ),
-                StoredPaperChange(
-                    id=2,
-                    change_key="new-a-duplicate",
-                    paper_id=2,
-                    source_name="Source A",
-                    change_type="new_paper",
-                    summary="New Paper A duplicate crawl",
-                    detected_at="2026-04-28T18:00:00",
-                ),
-            ],
-            "insights": [],
-            "tracking_items": [],
-        }
-
-        rows = build_new_paper_rows(snapshot, batch_date="2026-04-28")
-        batches = build_new_paper_batch_rows(snapshot)
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["title"], "New Paper A")
-        self.assertEqual(len(batches), 1)
-        self.assertEqual(batches[0]["batch_date"], "2026-04-28")
-        self.assertEqual(batches[0]["new_papers"], 1)
-        self.assertEqual(batches[0]["existing_papers_before_batch"], 1)
+    def test_source_status_rows_put_failed_and_blocked_sources_at_the_end(self) -> None:
+        states = ["failed", "healthy", "partial", "blocked", "running", "never", "stale"]
+        sources = [SourceConfig(state, f"https://example.com/{state}", "test", "", "") for state in states]
+        rows = build_source_status_rows([{"source_name": state, "health_state": state} for state in states], sources)
+        self.assertEqual([r["数据源"] for r in rows], ["healthy", "running", "never", "stale", "partial", "failed", "blocked"])
+        self.assertEqual(rows[0]["网址"], "https://example.com/healthy")
 
 
 if __name__ == "__main__":

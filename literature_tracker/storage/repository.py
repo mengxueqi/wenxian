@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from ..models import (
@@ -446,18 +449,43 @@ class SQLiteRepository:
         timestamp = datetime.now().isoformat(timespec="seconds")
         with closing(self._connect()) as connection:
             for paper in papers:
-                existing = connection.execute(
+                matches = connection.execute(
                     """
-                    SELECT id, metadata_json
+                    SELECT id, metadata_json, paper_key, raw_record_id, canonical_title,
+                           source_name, article_url
                     FROM papers
                     WHERE paper_key = ? OR raw_record_id = ?
                     ORDER BY
                         CASE WHEN paper_key = ? THEN 0 ELSE 1 END,
                         id ASC
-                    LIMIT 1
                     """,
                     (paper.paper_key, paper.raw_record_id, paper.paper_key),
-                ).fetchone()
+                ).fetchall()
+                existing = matches[0] if matches else None
+                if len(matches) == 2:
+                    by_key, by_raw = matches
+                    if self._same_work_title(by_key[4], paper.canonical_title):
+                        self._merge_paper_rows(connection, by_key, by_raw)
+                        existing = connection.execute(
+                            "SELECT id, metadata_json FROM papers WHERE id = ?",
+                            (by_key[0],),
+                        ).fetchone()
+                    else:
+                        # Keep unrelated works separate when new metadata claims an
+                        # already-used DOI. Record the rejected identity for review.
+                        paper = replace(
+                            paper,
+                            paper_key=f"url:{paper.source_name.lower()}::{paper.article_url.strip().lower()}",
+                            doi=None,
+                            metadata={
+                                **paper.metadata,
+                                "identity_conflict": {
+                                    "rejected_paper_key": paper.paper_key,
+                                    "other_paper_id": by_key[0],
+                                },
+                            },
+                        )
+                        existing = by_raw
                 metadata = self._merge_paper_metadata(
                     self._loads_json(existing[1]) if existing else {},
                     paper,
@@ -528,6 +556,71 @@ class SQLiteRepository:
                 )
             connection.commit()
         return len(papers)
+
+    @staticmethod
+    def _same_work_title(first: str | None, second: str) -> bool:
+        def normalized(value: str) -> str:
+            return re.sub(r"[^\w]+", " ", value.casefold()).strip()
+
+        first_key, second_key = normalized(first or ""), normalized(second)
+        if min(len(first_key.split()), len(second_key.split())) < 3:
+            return False
+        return SequenceMatcher(None, first_key, second_key).ratio() >= 0.92
+
+    @classmethod
+    def _merge_paper_rows(
+        cls,
+        connection: sqlite3.Connection,
+        keep: tuple[object, ...],
+        duplicate: tuple[object, ...],
+    ) -> None:
+        metadata = cls._loads_json(keep[1])
+        other_metadata = cls._loads_json(duplicate[1])
+        for key in ("observed_raw_record_ids", "observed_sources", "observed_article_urls"):
+            metadata[key] = sorted(set(metadata.get(key, [])) | set(other_metadata.get(key, [])))
+        for row in (keep, duplicate):
+            metadata = cls._merge_metadata_observation(
+                metadata,
+                raw_record_id=row[3],
+                source_name=row[5],
+                article_url=row[6],
+            )
+        merged_ids = set(metadata.get("merged_paper_ids", []))
+        merged_ids.add(duplicate[0])
+        metadata["merged_paper_ids"] = sorted(merged_ids)
+        metadata.setdefault("merged_paper_metadata", []).append(
+            {"paper_id": duplicate[0], "metadata": other_metadata}
+        )
+
+        for table in ("paper_changes", "paper_insights"):
+            connection.execute(
+                f"UPDATE {table} SET paper_id = ? WHERE paper_id = ?",
+                (keep[0], duplicate[0]),
+            )
+        keep_tracking = connection.execute(
+            "SELECT id FROM tracking_items WHERE paper_id = ?", (keep[0],)
+        ).fetchone()
+        if keep_tracking:
+            cursor = connection.execute(
+                "SELECT * FROM tracking_items WHERE paper_id = ?", (duplicate[0],)
+            )
+            columns = [item[0] for item in cursor.description]
+            archived = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            if archived:
+                metadata.setdefault("merged_tracking_items", []).extend(archived)
+            connection.execute(
+                "DELETE FROM tracking_items WHERE paper_id = ?", (duplicate[0],)
+            )
+        else:
+            connection.execute(
+                "UPDATE tracking_items SET paper_id = ? WHERE paper_id = ?",
+                (keep[0], duplicate[0]),
+            )
+        connection.execute(
+            "UPDATE papers SET metadata_json = ? WHERE id = ?",
+            (json.dumps(metadata, ensure_ascii=False), keep[0]),
+        )
+        connection.execute("DELETE FROM papers WHERE id = ?", (duplicate[0],))
 
     def fetch_papers(
         self,

@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["streamlit>=1.44,<2"]
+ui = ["streamlit>=1.56,<2"]
 
 [project.scripts]
 literature-tracker = "literature_tracker.cli:main"

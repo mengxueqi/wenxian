@@ -228,6 +228,46 @@ class CollectorHelperTests(unittest.TestCase):
 
 
 class GenericJournalCollectorTests(unittest.TestCase):
+    def test_ambiguous_issue_title_cannot_acquire_an_external_doi(self) -> None:
+        source = SourceConfig(
+            source_name="Metabolic Engineering", canonical_url="https://example.com",
+            platform="sciencedirect", incremental_url="https://example.com/feed.xml",
+            collector_kind="rss",
+        )
+        for title in ("Editorial Board", "Table of Contents", "Editorial Board Members"):
+            with self.subTest(title=title):
+                record = RawRecord(
+                    source_name=source.source_name, journal_name=source.source_name,
+                    listing_url=source.incremental_url, article_url="https://example.com/issue/1",
+                    title=title,
+                )
+                collector = DummyOpenAlexGenericJournalCollector({}, {
+                    "display_name": title, "doi": "https://doi.org/10.1000/unrelated",
+                    "id": "https://openalex.org/W1",
+                })
+                collector._enrich_from_external_metadata(source, record)
+                self.assertIsNone(record.doi)
+                self.assertNotIn("openalex_id", record.metadata)
+
+    def test_external_enrichment_rejects_a_conflicting_doi(self) -> None:
+        source = SourceConfig(
+            source_name="Metabolic Engineering", canonical_url="https://example.com",
+            platform="sciencedirect", incremental_url="https://example.com/feed.xml",
+            collector_kind="rss",
+        )
+        record = RawRecord(
+            source_name=source.source_name, journal_name=source.source_name,
+            listing_url=source.incremental_url, article_url="https://example.com/article/1",
+            title="A distinctive metabolic engineering study", doi="10.1000/original",
+        )
+        collector = DummyOpenAlexGenericJournalCollector({}, {
+            "display_name": record.title, "doi": "https://doi.org/10.1000/unrelated",
+            "abstract_inverted_index": {"Incorrect": [0], "abstract": [1]},
+        })
+        collector._enrich_from_external_metadata(source, record)
+        self.assertEqual(record.doi, "10.1000/original")
+        self.assertEqual(record.abstract, "")
+
     def test_rss_subdomain_is_recognized_as_feed(self) -> None:
         self.assertTrue(
             GenericJournalCollector._looks_like_feed_url(

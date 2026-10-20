@@ -17,6 +17,7 @@ def run_full_pipeline(
     source_name: str | None = None,
     limit: int | None = None,
     output_dir: Path = REPORTS_DIR,
+    generate_report: bool = False,
 ) -> dict[str, Any]:
     """Run the complete monitoring pipeline and return one scheduler-friendly result."""
     stages: dict[str, Any] = {}
@@ -52,15 +53,12 @@ def run_full_pipeline(
                 limit=limit,
             ),
         ),
-        (
-            "build_report",
-            lambda: build_report(
-                db_path=db_path,
-                source_name=source_name,
-                output_dir=output_dir,
-            ),
-        ),
     ]
+    if generate_report:
+        stage_calls.append((
+            "build_report",
+            lambda: build_report(db_path=db_path, source_name=source_name, output_dir=output_dir),
+        ))
 
     for stage_name, stage_call in stage_calls:
         try:

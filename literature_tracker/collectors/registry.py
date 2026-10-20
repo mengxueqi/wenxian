@@ -3,11 +3,14 @@ from __future__ import annotations
 from ..models import SourceConfig
 from .base import BaseCollector, CollectorError
 from .cip import CIPCollector
+from .crossref import CrossrefCollector
 from .generic import GenericJournalCollector
 from .springer import SpringerCollector
 
 
 def get_collector(source: SourceConfig) -> BaseCollector:
+    if "crossref_api" in source.collector_kind.casefold():
+        return CrossrefCollector()
     generic_collector = GenericJournalCollector()
     collectors: dict[str, BaseCollector] = {
         "asm": generic_collector,

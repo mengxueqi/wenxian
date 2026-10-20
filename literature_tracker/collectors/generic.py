@@ -429,11 +429,18 @@ class GenericJournalCollector(BaseCollector):
     ) -> None:
         if source.platform.casefold() != "sciencedirect":
             return
+        # Repeated issue labels cannot identify a work in a title search.
+        if not record.doi and not self._is_distinctive_title(record.title):
+            return
         if record.doi and record.metadata.get("keywords") and record.abstract:
             return
 
         work = self._fetch_openalex_work(record)
-        if work and self._openalex_title_matches(record.title, work):
+        if (
+            work
+            and self._openalex_title_matches(record.title, work)
+            and self._external_doi_agrees(record.doi, str(work.get("doi") or ""))
+        ):
             doi = self._normalize_external_doi(str(work.get("doi") or ""))
             if doi and not record.doi:
                 record.doi = doi
@@ -452,7 +459,11 @@ class GenericJournalCollector(BaseCollector):
                 record.metadata["external_metadata_source"] = "openalex"
 
         pubmed_record = self._fetch_pubmed_record(record)
-        if pubmed_record and self._pubmed_title_matches(record.title, pubmed_record):
+        if (
+            pubmed_record
+            and self._pubmed_title_matches(record.title, pubmed_record)
+            and self._external_doi_agrees(record.doi, str(pubmed_record.get("doi") or ""))
+        ):
             doi = self._normalize_external_doi(str(pubmed_record.get("doi") or ""))
             if doi and not record.doi:
                 record.doi = doi
@@ -509,6 +520,25 @@ class GenericJournalCollector(BaseCollector):
     @staticmethod
     def _normalize_match_text(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+    @classmethod
+    def _is_distinctive_title(cls, value: str) -> bool:
+        words = cls._normalize_match_text(value).split()
+        return len(words) >= 3 and " ".join(words) not in {
+            "list of contributors",
+            "table of contents",
+            "guide for authors",
+            "instructions for authors",
+            "editorial board members",
+        }
+
+    @classmethod
+    def _external_doi_agrees(cls, known_doi: str | None, candidate_doi: str) -> bool:
+        if not known_doi:
+            return True
+        candidate = cls._normalize_external_doi(candidate_doi)
+        known = cls._normalize_external_doi(known_doi)
+        return bool(candidate and known and candidate.casefold() == known.casefold())
 
     @staticmethod
     def _normalize_external_doi(value: str) -> str | None:

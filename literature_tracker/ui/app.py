@@ -1,441 +1,202 @@
 from __future__ import annotations
 
 from html import escape
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 
-from ..config import load_sources
-from ..paths import DB_PATH
-from ..presentation import (
-    SORT_OPTIONS,
-    build_change_rows,
-    build_filter_options,
-    build_filtered_snapshot,
-    build_markdown_report,
-    build_new_paper_batch_rows,
-    build_new_paper_rows,
-    build_paper_rows,
-    build_recent_focus_cards,
-    build_snapshot,
-    build_tracking_rows,
-    rows_to_csv_bytes,
+from ..catalog import (
+    THEME_LABELS, article_export_rows, build_catalog, select_articles, source_summary,
 )
+from ..config import load_author_watchlist, load_sources, load_theme_watchlist
+from ..paths import DB_PATH, SOURCES_CSV
+from ..presentation import build_run_health, build_source_status_rows, rows_to_csv_bytes
 from ..storage import SQLiteRepository
-from ..tasks import run_full_pipeline
+from ..tasks.update_job import UpdateJob
+
+
+TIME_WINDOWS = {"最近 30 天入库": 30, "最近 7 天入库": 7, "最近 90 天入库": 90, "全部": None}
+SORT_OPTIONS = {"发表时间": "published_desc", "入库时间": "added_desc", "推荐分": "priority_desc", "标题": "title_asc"}
+
+
+def _file_stamp(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except FileNotFoundError:
+        return 0, 0
+
+
+@st.cache_resource(show_spinner=False)
+def _prepare_repository(db_path: str, sources_stamp: tuple[int, int]) -> SQLiteRepository:
+    repository = SQLiteRepository(Path(db_path))
+    repository.initialize()
+    repository.sync_sources(load_sources())
+    return repository
+
+
+@st.cache_data(ttl=60, max_entries=4, show_spinner=False)
+def _load_catalog(db_path: str, database_stamp: tuple) -> list[dict[str, Any]]:
+    return build_catalog(SQLiteRepository(Path(db_path)))
+
+
+def _current_catalog(db_path: Path) -> list[dict[str, Any]]:
+    return _load_catalog(str(db_path.resolve()), (_file_stamp(db_path), _file_stamp(Path(str(db_path) + "-wal"))))
+
+
+@st.cache_resource(show_spinner=False)
+def _update_job(db_path: str) -> UpdateJob:
+    return UpdateJob(Path(db_path))
+
+
+@st.fragment(run_every=5)
+def _render_update_controls(db_path: Path) -> None:
+    job = _update_job(str(db_path.resolve()))
+    running = job.future is not None and not job.future.done()
+    if st.button("立即更新", type="primary", width="stretch", disabled=running):
+        job.start()
+        running = True
+    if st.button("刷新页面数据", width="stretch"):
+        _load_catalog.clear()
+        st.rerun()
+    if running:
+        st.info("正在后台更新，可在数据源页查看实时状态。")
+    elif job.future is not None:
+        try:
+            result = job.future.result()
+        except Exception as exc:
+            result = {"status": "failed", "error": str(exc)}
+        if result["status"] == "success":
+            count = result.get("stages", {}).get("crawl", {}).get("stored_raw_records", 0)
+            st.success(f"更新完成，本次采集 {count} 条记录。")
+        elif result["status"] == "partial":
+            st.warning("更新已完成，部分来源异常，可在数据源页查看。")
+        else:
+            st.error("更新失败：" + str(result.get("error") or "请检查运行日志。"))
 
 
 def render_app(db_path: Path = DB_PATH) -> None:
-    st.set_page_config(
-        page_title="Literature Tracker",
-        layout="wide",
+    st.set_page_config(page_title="文献监控", layout="wide")
+    st.title("文献监控")
+    repository = _prepare_repository(str(db_path.resolve()), _file_stamp(SOURCES_CSV))
+
+    with st.sidebar:
+        _render_update_controls(db_path)
+    cards = _current_catalog(db_path)
+    st.sidebar.caption(f"文献库共 {len(cards):,} 篇")
+    tabs = st.tabs(["推荐", "搜索", "数据源"], key="main_view", on_change="rerun")
+    if tabs[0].open:
+        with tabs[0]:
+            _render_recommendations(cards)
+    if tabs[1].open:
+        with tabs[1]:
+            _render_search(cards)
+    if tabs[2].open:
+        with tabs[2]:
+            _render_sources(repository)
+
+
+def _render_recommendations(cards: list[dict[str, Any]]) -> None:
+    columns = st.columns(2)
+    window = columns[0].selectbox("入库范围", list(TIME_WINDOWS), key="recommendation_window")
+    limit = columns[1].selectbox("显示篇数", [10, 20, 50], key="recommendation_limit")
+    results = select_articles(cards, days=TIME_WINDOWS[window], recommended_only=True, sort_by="priority_desc")
+    st.caption(f"命中关注主题或作者 {len(results)} 篇，按现有评分排序，显示前 {min(limit, len(results))} 篇。")
+    with st.expander("当前推荐规则"):
+        theme_rules = load_theme_watchlist()
+        author_rules = load_author_watchlist()
+        st.write("关注主题：" + "、".join(THEME_LABELS.get(str(r["theme_name"]), str(r["theme_name"])) for r in theme_rules))
+        st.write(f"关注作者：{len(author_rules)} 位；评分沿用主题、作者、变化类型及近期活跃度的现有权重。")
+        st.caption("推荐时间范围按首次入库时间计算。")
+    if not results:
+        st.info("该时间范围内暂无匹配文章，可切换到“全部”或在搜索页查看文献库。")
+    for card in results[:limit]:
+        _render_article(card)
+
+
+def _render_search(cards: list[dict[str, Any]]) -> None:
+    query = st.text_input("搜索文章", placeholder="标题、作者、DOI、摘要或关键词；多个词用空格分隔", key="article_query")
+    columns = st.columns(4)
+    sources = sorted({source for card in cards for source in card["sources"]})
+    source = columns[0].selectbox("数据源", ["全部数据源", *sources], key="article_source")
+    topics = sorted({theme for card in cards for theme in card["themes"]})
+    themes = columns[1].multiselect("关注主题", topics, format_func=lambda value: THEME_LABELS.get(value, value), key="article_themes")
+    window = columns[2].selectbox("入库范围", ["全部", *[label for label in TIME_WINDOWS if label != "全部"]], key="search_window")
+    sort_label = columns[3].selectbox("排序", list(SORT_OPTIONS), key="article_sort")
+    results = select_articles(
+        cards, query=query, source_name=None if source == "全部数据源" else source,
+        themes=themes, days=TIME_WINDOWS[window], sort_by=SORT_OPTIONS[sort_label],
     )
-    st.title("Literature Tracker")
-    st.caption("Monitor sources, detect changes, and maintain a review queue.")
-
-    repository = SQLiteRepository(db_path)
-    repository.initialize()
-    repository.sync_sources(load_sources())
-
-    if st.sidebar.button("一键抓取", type="primary", use_container_width=True):
-        with st.spinner("一键抓取中..."):
-            st.session_state["one_click_crawl_result"] = _run_one_click_crawl(db_path)
-
-    if "one_click_crawl_result" in st.session_state:
-        result = st.session_state["one_click_crawl_result"]
-        message = (
-            "更新完成："
-            f"{result['raw_records']} 条原始记录，"
-            f"{result['papers']} 篇论文，"
-            f"{result['changes']} 条变化，"
-            f"{result['tracking_items']} 个追踪项。"
-        )
-        if result["status"] == "success":
-            st.sidebar.success(message)
-        else:
-            st.sidebar.warning(message + " 部分来源或阶段需要检查。")
-
-    all_snapshot = build_snapshot(repository)
-    tracking_rows = build_tracking_rows(all_snapshot)
-    change_rows = build_change_rows(all_snapshot)
-    paper_rows = build_paper_rows(all_snapshot)
-    report_title = "Literature Tracker Report"
-    report_markdown = build_markdown_report(all_snapshot, title=report_title)
-
-    st.sidebar.header("Exports")
-    st.sidebar.download_button(
-        "Tracking CSV",
-        data=rows_to_csv_bytes(tracking_rows),
-        file_name="tracking_queue.csv",
-        mime="text/csv",
-        disabled=not tracking_rows,
-        use_container_width=True,
+    if not results:
+        st.info("没有符合条件的文章。")
+        return
+    page_size = 25
+    page_count = (len(results) + page_size - 1) // page_size
+    filter_key = (query, source, tuple(themes), window, sort_label)
+    if st.session_state.get("search_filter_key") != filter_key:
+        st.session_state["search_page"] = 1
+        st.session_state["search_filter_key"] = filter_key
+    st.session_state["search_page"] = min(st.session_state.get("search_page", 1), page_count)
+    controls = st.columns([1, 2])
+    page = controls[0].number_input("页码", min_value=1, max_value=page_count, step=1, key="search_page")
+    controls[1].download_button(
+        "导出搜索结果 CSV", data=rows_to_csv_bytes(article_export_rows(results)),
+        file_name="articles.csv", mime="text/csv", on_click="ignore",
     )
-    st.sidebar.download_button(
-        "Changes CSV",
-        data=rows_to_csv_bytes(change_rows),
-        file_name="change_analysis.csv",
-        mime="text/csv",
-        disabled=not change_rows,
-        use_container_width=True,
-    )
-    st.sidebar.download_button(
-        "Papers CSV",
-        data=rows_to_csv_bytes(paper_rows),
-        file_name="papers.csv",
-        mime="text/csv",
-        disabled=not paper_rows,
-        use_container_width=True,
-    )
-    st.sidebar.download_button(
-        "Report Markdown",
-        data=report_markdown.encode("utf-8"),
-        file_name="literature_tracker_report.md",
-        mime="text/markdown",
-        disabled=not report_markdown.strip(),
-        use_container_width=True,
-    )
+    start = (page - 1) * page_size
+    st.caption(f"共 {len(results):,} 篇 · 第 {page}/{page_count} 页 · 显示第 {start + 1}–{min(start + page_size, len(results))} 篇")
+    for card in results[start : start + page_size]:
+        _render_article(card)
 
-    metrics = all_snapshot["metrics"]
-    metric_columns = st.columns(4)
-    metric_columns[0].metric("Papers", metrics["papers"])
-    metric_columns[1].metric("Changes", metrics["changes"])
-    metric_columns[2].metric("Insights", metrics["insights"])
-    metric_columns[3].metric("Tracking", metrics["tracking_items"])
 
-    tabs = st.tabs(["Focus", "Library", "Dashboard", "Change Analysis"])
-
-    with tabs[0]:
-        focus_cards = build_recent_focus_cards(all_snapshot, days=30, limit=10)
-        if focus_cards:
-            for card in focus_cards:
-                _render_literature_card(card)
-        else:
-            st.info("No focus papers entered the library in the last 30 days.")
-
-    with tabs[1]:
-        source_options = [
-            "All Sources",
-            *[row["source_name"] for row in all_snapshot["source_summary"]],
-        ]
-        selected_source = st.selectbox("Source", source_options, index=0)
-        effective_source = None if selected_source == "All Sources" else selected_source
-        library_snapshot = (
-            all_snapshot
-            if effective_source is None
-            else build_snapshot(repository, source_name=effective_source)
+@st.fragment(run_every=10)
+def _render_sources(repository: SQLiteRepository) -> None:
+    health, _ = build_run_health(repository, include_pipeline=False)
+    st.markdown("#### 数据源状态")
+    st.caption(f"每 10 秒自动刷新 · 最后刷新 {datetime.now():%H:%M:%S} · 失败来源排后")
+    rows = build_source_status_rows(health, load_sources())
+    if rows:
+        st.dataframe(
+            rows, width="stretch", hide_index=True,
+            column_config={"网址": st.column_config.LinkColumn("网址", width="large")},
         )
-        filter_options = build_filter_options(library_snapshot)
-
-        filter_top_columns = st.columns([2, 1])
-        query = filter_top_columns[0].text_input(
-            "Search",
-            placeholder="Title, DOI, theme, summary...",
-        )
-        tracking_statuses = filter_top_columns[1].multiselect(
-            "Tracking status",
-            filter_options["tracking_statuses"],
-        )
-
-        max_priority = max(
-            (float(card["priority_score"] or 0) for card in library_snapshot["focus_cards"]),
-            default=1.0,
-        )
-        slider_max = max(1.0, round(max_priority, 2))
-        filter_bottom_columns = st.columns([1, 1, 1, 1])
-        change_types = filter_bottom_columns[0].multiselect(
-            "Change type",
-            filter_options["change_types"],
-        )
-        themes = filter_bottom_columns[1].multiselect(
-            "Keywords",
-            filter_options["themes"],
-        )
-        min_priority = filter_bottom_columns[2].slider(
-            "Minimum priority",
-            min_value=0.0,
-            max_value=slider_max,
-            value=0.0,
-            step=0.01,
-        )
-        sort_label = filter_bottom_columns[3].selectbox(
-            "Sort",
-            list(SORT_OPTIONS.values()),
-            index=0,
-        )
-        sort_by = next(
-            key
-            for key, value in SORT_OPTIONS.items()
-            if value == sort_label
-        )
-
-        library_filtered_snapshot = build_filtered_snapshot(
-            library_snapshot,
-            query=query,
-            tracking_statuses=tracking_statuses,
-            change_types=change_types,
-            themes=themes,
-            min_priority=min_priority,
-            sort_by=sort_by,
-        )
-        active_filters = _build_active_filters(
-            source_name=effective_source,
-            query=query,
-            tracking_statuses=tracking_statuses,
-            change_types=change_types,
-            themes=themes,
-            min_priority=min_priority,
-            sort_label=sort_label,
-        )
-        if active_filters:
-            st.caption("Active filters: " + " | ".join(active_filters))
-
-        if library_filtered_snapshot["focus_cards"]:
-            for card in library_filtered_snapshot["focus_cards"]:
-                _render_literature_card(card)
-        else:
-            st.info("No tracking items match the current filters.")
-
-    with tabs[2]:
-        summary_columns = st.columns(3)
-        with summary_columns[0]:
-            st.markdown("#### Source Summary")
-            if all_snapshot["source_summary"]:
-                st.dataframe(
-                    all_snapshot["source_summary"],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No visible source summary rows.")
-
-        with summary_columns[1]:
-            st.markdown("#### Change Breakdown")
-            if all_snapshot["change_breakdown"]:
-                st.dataframe(
-                    [
-                        {"change_type": key, "count": value}
-                        for key, value in all_snapshot["change_breakdown"].items()
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No visible changes.")
-
-        with summary_columns[2]:
-            st.markdown("#### Tracking Breakdown")
-            if all_snapshot["tracking_breakdown"]:
-                st.dataframe(
-                    [
-                        {"tracking_status": key, "count": value}
-                        for key, value in all_snapshot["tracking_breakdown"].items()
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No visible tracking items.")
-
-        health_attention = [
-            row
-            for row in [
-                *all_snapshot["source_health"],
-                *all_snapshot["pipeline_health"],
-            ]
-            if row["health_state"] != "healthy"
-        ]
-        if health_attention:
-            st.warning(f"{len(health_attention)} source or pipeline health item(s) need attention.")
-
-        health_columns = st.columns(2)
-        with health_columns[0]:
-            st.markdown("#### Source Health")
-            st.dataframe(
-                all_snapshot["source_health"],
-                use_container_width=True,
-                hide_index=True,
-            )
-        with health_columns[1]:
-            st.markdown("#### Pipeline Health")
-            st.dataframe(
-                all_snapshot["pipeline_health"],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with tabs[3]:
-        new_paper_batches = build_new_paper_batch_rows(all_snapshot)
-        if new_paper_batches:
-            batch_labels = [
-                (
-                    f"{batch['batch_date']} | {batch['new_papers']} new | "
-                    f"{batch['existing_papers_before_batch']} existing before"
-                )
-                for batch in new_paper_batches
-            ]
-            selected_batch_label = st.selectbox("Batch date", batch_labels)
-            selected_batch = new_paper_batches[batch_labels.index(selected_batch_label)]
-            selected_batch_date = selected_batch["batch_date"]
-
-            batch_columns = st.columns(4)
-            batch_columns[0].metric("New papers", selected_batch["new_papers"])
-            batch_columns[1].metric(
-                "Existing before",
-                selected_batch["existing_papers_before_batch"],
-            )
-            batch_columns[2].metric("Sources", selected_batch["source_count"])
-            batch_columns[3].metric("Priority", selected_batch["priority_items"])
-
-            new_paper_rows = build_new_paper_rows(
-                all_snapshot,
-                batch_date=selected_batch_date,
-            )
-            st.dataframe(new_paper_rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No new paper batches match the current filters.")
+    else:
+        st.info("暂无数据源。")
+    st.markdown("#### Source Summary")
+    summary = source_summary(_current_catalog(repository.db_path))
+    if summary:
+        st.dataframe(summary, width="stretch", hide_index=True)
+    else:
+        st.info("暂无来源统计。")
 
 
-def _build_active_filters(
-    *,
-    source_name: str | None,
-    query: str,
-    tracking_statuses: list[str],
-    change_types: list[str],
-    themes: list[str],
-    min_priority: float,
-    sort_label: str,
-) -> list[str]:
-    parts: list[str] = []
-    if source_name:
-        parts.append(f"source={source_name}")
-    if query.strip():
-        parts.append(f"query={query.strip()}")
-    if tracking_statuses:
-        parts.append("status=" + ",".join(tracking_statuses))
-    if change_types:
-        parts.append("change=" + ",".join(change_types))
-    if themes:
-        parts.append("keywords=" + ",".join(themes))
-    if min_priority > 0:
-        parts.append(f"min_priority={min_priority:.2f}")
-    if sort_label != SORT_OPTIONS["priority_desc"]:
-        parts.append(f"sort={sort_label}")
-    return parts
-
-
-def _run_one_click_crawl(db_path: Path) -> dict[str, object]:
-    summary = run_full_pipeline(db_path=db_path)
-    stages = summary["stages"]
-    crawl_summary = stages.get("crawl", {})
-    process_summary = stages.get("process", {})
-    change_summary = stages.get("detect_changes", {})
-    insight_summary = stages.get("build_insights", {})
-
-    return {
-        "status": summary["status"],
-        "raw_records": int(crawl_summary.get("stored_raw_records", 0)),
-        "papers": int(process_summary.get("upserted_papers", 0)),
-        "changes": int(change_summary.get("detected_changes", 0)),
-        "tracking_items": int(insight_summary.get("upserted_tracking_items", 0)),
-    }
-
-
-def _render_literature_card(card: dict[str, object]) -> None:
+def _render_article(card: dict[str, Any]) -> None:
     with st.container(border=True):
         st.markdown(
-            "<div style='font-size: 1.08rem; font-weight: 650; "
-            f"line-height: 1.35;'>{escape(str(card['title']))}</div>",
-            unsafe_allow_html=True,
+            "<div style='font-size:1.08rem;font-weight:600;line-height:1.4'>"
+            + escape(card["title"]) + "</div>", unsafe_allow_html=True,
         )
-        st.caption(
-            f"{card['source_name']} | {card['journal_name']} | "
-            f"{card['published_at'] or 'unknown date'}"
-        )
-        meta_columns = st.columns(2)
-        with meta_columns[0]:
-            _render_compact_metric(
-                "Priority",
-                f"{float(card['priority_score'] or 0):.2f}",
-            )
-        with meta_columns[1]:
-            _render_compact_metric("Status", str(card["tracking_status"] or "n/a"))
-        abstract = str(card["abstract"] or "")
-        source_summary = str(card.get("source_summary") or "")
-        if abstract:
-            expander_label = "More abstract"
-            abstract_preview, abstract_rest = _split_leading_sentences(
-                abstract,
-                sentence_count=2,
-            )
-            st.write(abstract_preview)
-        elif source_summary:
-            expander_label = "More source metadata"
-            abstract_preview, abstract_rest = _split_leading_sentences(
-                source_summary,
-                sentence_count=2,
-            )
-            st.caption("No abstract provided by source. Showing source metadata.")
-            st.write(abstract_preview)
-        else:
-            expander_label = "More abstract"
-            abstract_rest = ""
-            st.caption("No abstract provided by source.")
-        if abstract_rest:
-            with st.expander(expander_label):
-                st.write(abstract_rest)
-        keywords = card.get("keywords", [])
-        themes = card.get("themes", [])
-        if keywords:
-            st.write("Keywords: " + ", ".join(str(keyword) for keyword in keywords))
-        if themes:
-            st.write("Themes: " + ", ".join(str(theme) for theme in themes))
+        st.caption(f"{card['journal_name'] or card['source_name']} · {card['published_at'] or '发表日期未提供'}")
+        if card["recommendation_reason"]:
+            st.caption(f"推荐分 {card['priority_score']:.2f} · {card['recommendation_reason']}")
+        abstract = card["abstract"]
+        preview = abstract or card["source_summary"]
+        if not abstract:
+            st.caption("来源未提供摘要。" if not preview else "来源未提供摘要，以下为来源简介。")
+        if preview:
+            text = " ".join(preview.split())
+            st.write(text if len(text) <= 360 else text[:360].rstrip() + "…")
+        with st.expander("摘要与详细信息"):
+            if abstract:
+                st.write(abstract)
+            if card["authors"]:
+                st.write("作者：" + card["authors"])
+            if card["doi"]:
+                st.write("DOI：" + card["doi"])
+            if card["keywords"]:
+                st.write("关键词：" + "、".join(card["keywords"]))
+            st.caption("来源：" + "、".join(card["sources"]) + " · 入库：" + card["created_at"][:10])
         if card["article_url"]:
-            st.markdown(f"[Open Article]({card['article_url']})")
-
-
-def _render_compact_metric(label: str, value: str) -> None:
-    st.markdown(
-        "<div style='margin: 0.3rem 0 0.8rem 0;'>"
-        f"<div style='font-size: 0.78rem; color: #6b7280; line-height: 1.2;'>{escape(label)}</div>"
-        f"<div style='font-size: 1.05rem; font-weight: 600; line-height: 1.3; color: #111827;'>{escape(value)}</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def _preview_text(value: str, *, max_chars: int = 360) -> tuple[str, bool]:
-    normalized = " ".join(value.split())
-    if len(normalized) <= max_chars:
-        return normalized, False
-    return normalized[:max_chars].rstrip() + "...", True
-
-
-def _split_leading_sentences(value: str, *, sentence_count: int) -> tuple[str, str]:
-    normalized = " ".join(value.split())
-    if not normalized:
-        return "No abstract available.", ""
-
-    abbreviations = {"e.g", "i.e", "etc", "fig", "eq", "no", "al", "sp", "spp", "vs"}
-    sentence_ends: list[int] = []
-    for index, char in enumerate(normalized):
-        if char not in ".!?。！？":
-            continue
-        prefix = normalized[:index].rstrip()
-        suffix = normalized[index + 1 :].lstrip()
-        previous_token = prefix.rsplit(" ", 1)[-1].rstrip(".").casefold()
-        if char == "." and previous_token in abbreviations:
-            continue
-        if char == "." and suffix and suffix[0].islower():
-            continue
-        sentence_ends.append(index + 1)
-        if len(sentence_ends) >= sentence_count:
-            split_at = sentence_ends[-1]
-            preview = normalized[:split_at].strip()
-            rest = normalized[split_at:].strip()
-            return preview, rest
-
-    preview, has_more = _preview_text(normalized, max_chars=220)
-    if not has_more:
-        return preview, ""
-    return preview, normalized[len(preview.rstrip(".")) :].strip()
+            st.link_button("阅读原文", card["article_url"])

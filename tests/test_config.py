@@ -26,7 +26,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_load_existing_sources(self) -> None:
         sources = load_sources(SOURCES_CSV)
-        self.assertEqual(len(sources), 42)
+        self.assertEqual(len(sources), 131)
         self.assertEqual(sources[0].source_name, "合成生物学")
         self.assertEqual(sources[1].platform, "springer")
         self.assertEqual(
@@ -36,8 +36,14 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("sciencedirect", {source.platform for source in sources})
         self.assertIn("science", {source.platform for source in sources})
         self.assertIn("wiley", {source.platform for source in sources})
-        self.assertEqual(sum(source.status == "active" for source in sources), 33)
-        self.assertEqual(sum(source.status == "blocked" for source in sources), 9)
+        self.assertEqual(sum(source.status == "active" for source in sources), 131)
+        self.assertEqual(sum(source.status == "blocked" for source in sources), 0)
+        metadata_sources = [s for s in sources if s.collector_kind == "crossref_api+pubmed"]
+        self.assertEqual(len(metadata_sources), 98)
+        self.assertEqual(
+            next(s.incremental_url for s in metadata_sources if s.source_name == "Microbiology"),
+            "https://api.crossref.org/journals/1465-2080/works",
+        )
         self.assertEqual(
             {source.source_name for source in sources if source.platform == "science"},
             {

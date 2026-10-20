@@ -126,7 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_all_parser = subparsers.add_parser(
         "run-all",
-        help="Run crawl, process, change detection, insights, and report",
+        help="Update sources, article information, and recommendations",
+    )
+    run_all_parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Also generate an optional Markdown report.",
     )
     run_all_parser.add_argument(
         "--db",
@@ -203,6 +208,7 @@ def main() -> None:
             db_path=args.db,
             source_name=args.source,
             limit=args.limit,
+            generate_report=args.report,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         if summary["status"] != "success":
