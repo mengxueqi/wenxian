@@ -109,7 +109,7 @@ def _render_recommendations(cards: list[dict[str, Any]]) -> None:
         author_rules = load_author_watchlist()
         st.write("关注主题：" + "、".join(THEME_LABELS.get(str(r["theme_name"]), str(r["theme_name"])) for r in theme_rules))
         st.write(f"关注作者：{len(author_rules)} 位；评分沿用主题、作者、变化类型及近期活跃度的现有权重。")
-        st.caption("推荐时间范围按首次入库时间计算。")
+        st.caption("排除更正、勘误、撤稿等通知及已撤稿论文；时间范围按首次入库时间计算。")
     if not results:
         st.info("该时间范围内暂无匹配文章，可切换到“全部”或在搜索页查看文献库。")
     for card in results[:limit]:

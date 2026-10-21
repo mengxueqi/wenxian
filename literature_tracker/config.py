@@ -78,6 +78,8 @@ def load_theme_watchlist(
                     "theme_name": theme_name,
                     "keywords": keywords,
                     "score_weight": _parse_score(row.get("score_weight"), 0.15),
+                    "required_keywords": _split_pipe_values(row.get("required_keywords") or ""),
+                    "match_mode": (row.get("match_mode") or "substring").strip().casefold(),
                 }
             )
     return entries

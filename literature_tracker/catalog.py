@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta
+from html import unescape
+import re
 from typing import Any
 
 from .presentation import metadata_keywords
@@ -22,7 +24,36 @@ THEME_LABELS = {
     "phenethyl_alcohol": "苯乙醇",
     "carbonyl_reductase": "羰基还原酶",
     "p450bs_beta": "P450BSβ",
+    "sclareol": "香紫苏醇",
+    "macrocyclic_lactone": "大环内酯",
+    "squalene": "角鲨烯",
+    "heme": "血红素",
+    "directed_evolution": "定向进化",
+    "lactone_product_extraction": "内酯产物提取",
 }
+
+
+_NOTICE_TITLE = re.compile(
+    r"^(?:"
+    r"(?:(?:author|publisher|editor)(?:['’]s)?\s+)?(?:corrigendum|corrigenda|erratum|errata)\b"
+    r"|(?:(?:author|publisher|editor)(?:['’]s)?\s+)?corrections?"
+    r"(?=\s*(?:$|[:：\[\]\(\"“‘–—-])|\s+(?:to|for)\b)"
+    r"|(?:retraction|withdrawal)(?:\s+(?:notice|note|statement))?"
+    r"(?=\s*(?:$|[:：\[\(\"“‘–—-])|\s+(?:to|for)\b|\s+of\s*(?:[:：\"“‘]|(?:the\s+)?(?:research\s+)?article\b))"
+    r"|(?:retracted|withdrawn)(?=\s*(?:$|[:：\[])|\s+by\s+(?:the\s+)?authors?\b)"
+    r"|notice\s+of\s+(?:correction|retraction|withdrawal)\b"
+    r"|(?:editorial\s+)?expression\s+of\s+concern\b"
+    r"|(?:更正|勘误|撤稿|撤回)(?:通知|声明|启事)?(?=\s*(?:$|[:：《“「\[\(（–—-]))"
+    r"|关于[《“].+[》”]的(?:更正|勘误|撤稿|撤回)(?:通知|声明|启事)?\s*$"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_publication_notice(title: str) -> bool:
+    # Match editorial title labels, not scientific uses of "correction" in the paper.
+    plain_title = unescape(re.sub(r"<[^>]+>", "", title)).lstrip("\ufeff \t\r\n[({【（")
+    return bool(_NOTICE_TITLE.match(plain_title))
 
 
 def build_catalog(repository: SQLiteRepository) -> list[dict[str, Any]]:
@@ -48,6 +79,8 @@ def build_catalog(repository: SQLiteRepository) -> list[dict[str, Any]]:
             "themes": list(metadata.get("themes") or []),
             "author_hits": list(metadata.get("author_hits") or []),
             "priority_score": float(item.get("priority_score") or 0),
+            "is_publication_notice": is_publication_notice(paper.canonical_title),
+            "is_retracted": str(paper.metadata.get("is_retracted", "")).strip().casefold() in {"true", "1", "yes"},
         }
         card["recommendation_reason"] = recommendation_reason(card)
         card["_search_text"] = " ".join(
@@ -91,8 +124,11 @@ def select_articles(
             continue
         if selected_themes and not selected_themes.intersection(card["themes"]):
             continue
-        if recommended_only and not (card["themes"] or card["author_hits"]):
-            continue
+        if recommended_only:
+            if card.get("is_publication_notice") or card.get("is_retracted"):
+                continue
+            if not (card["themes"] or card["author_hits"]):
+                continue
         if terms and not all(term in card["_search_text"] for term in terms):
             continue
         if days is not None:

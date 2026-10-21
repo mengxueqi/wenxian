@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from datetime import datetime
+from functools import lru_cache
 
 from ..config import load_author_watchlist, load_theme_watchlist
 from ..models import (
@@ -170,15 +171,34 @@ def _extract_themes(
         keyword_text = " ".join(str(keyword) for keyword in keywords)
     else:
         keyword_text = str(keywords or "")
-    text = f"{paper.canonical_title} {paper.abstract} {keyword_text}".lower()
+    text = f"{paper.canonical_title} {paper.abstract} {keyword_text}".casefold()
     themes: list[str] = []
     for entry in theme_rules:
         keywords = entry["keywords"]
+        required = entry.get("required_keywords") or []
+        whole_word = entry.get("match_mode") == "whole_word"
         if isinstance(keywords, list) and any(
-            str(keyword).casefold() in text for keyword in keywords
-        ):
+            _theme_keyword_matches(text, str(keyword), whole_word=whole_word)
+            for keyword in keywords
+        ) and (not required or any(
+            _theme_keyword_matches(text, str(keyword), whole_word=whole_word)
+            for keyword in required
+        )):
             themes.append(str(entry["theme_name"]))
     return themes
+
+
+def _theme_keyword_matches(text: str, keyword: str, *, whole_word: bool = False) -> bool:
+    keyword = keyword.strip().casefold()
+    if not keyword or keyword not in text:
+        return False
+    if whole_word:
+        # ASCII boundaries allow Chinese phrases inside sentences while preventing
+        # "heme" from matching "scheme" and "sclareol" from matching "sclareolide".
+        prefix = r"(?<![a-z0-9])" if keyword[0].isascii() and keyword[0].isalnum() else ""
+        suffix = r"(?![a-z0-9])" if keyword[-1].isascii() and keyword[-1].isalnum() else ""
+        return re.search(prefix + re.escape(keyword) + suffix, text) is not None
+    return True
 
 
 def _extract_author_hits(
@@ -302,6 +322,8 @@ def _author_name_matches(paper_author: str, watched_name: str) -> bool:
         return False
     if " ".join(watched_tokens) == " ".join(paper_tokens):
         return True
+    if "".join(watched_tokens) == "".join(paper_tokens):
+        return True
     if len(watched_tokens) == 1:
         return watched_tokens[0] in paper_tokens
 
@@ -314,9 +336,10 @@ def _author_name_matches(paper_author: str, watched_name: str) -> bool:
     return any(token in paper_tokens for token in given_tokens)
 
 
-def _name_tokens(value: str) -> list[str]:
+@lru_cache(maxsize=32768)
+def _name_tokens(value: str) -> tuple[str, ...]:
     normalized = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", value.casefold())
-    return [token for token in normalized.split() if token]
+    return tuple(token for token in normalized.split() if token)
 
 
 def _dedupe_preserving_order(values: list[str]) -> list[str]:
